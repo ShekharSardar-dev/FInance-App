@@ -444,7 +444,177 @@ def main(page: ft.Page):
         build_home()
         page.update()
 
-    invest_content = placeholder("Investments — coming next stage")
+    invest_content = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+
+    invest_name_field = ft.TextField(label="Investment name", border_color=ft.Colors.OUTLINE)
+    invest_amount_field = ft.TextField(label="Amount invested", prefix=ft.Text("₹"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    invest_feedback = ft.Text("", color=ft.Colors.GREEN)
+
+    update_value_field = ft.TextField(label="Current value", prefix=ft.Text("₹"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    update_value_error = ft.Text("", color=ft.Colors.RED)
+    active_investment_id = {"id": None}
+
+    def close_update_dialog(e=None):
+        page.pop_dialog()
+
+    def confirm_update_value(e):
+        update_value_error.value = ""
+        try:
+            new_value = float(update_value_field.value)
+            if new_value < 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            update_value_error.value = "Enter a valid amount"
+            page.update()
+            return
+
+        db.update_investment_value(active_investment_id["id"], new_value)
+        page.pop_dialog()
+        build_invest()
+        page.update()
+
+    update_value_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Update Current Value"),
+        content=ft.Column([update_value_field, update_value_error], tight=True, spacing=12),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_update_dialog),
+            ft.TextButton("Save", on_click=confirm_update_value),
+        ],
+    )
+
+    def open_update_dialog(investment_id, current_value):
+        active_investment_id["id"] = investment_id
+        update_value_field.value = str(current_value)
+        update_value_error.value = ""
+        page.show_dialog(update_value_dialog)
+
+    def build_invest():
+        invest_content.controls.clear()
+
+        total_invested, total_current, gain_loss = db.get_investment_totals()
+        gain_color = ft.Colors.GREEN if gain_loss >= 0 else ft.Colors.RED
+        gain_pct = (gain_loss / total_invested * 100) if total_invested else 0
+
+        totals_card = card(
+            ft.Column(
+                [
+                    ft.Row(
+                        [
+                            ft.Column(
+                                [
+                                    ft.Text("Invested", size=12, color=ft.Colors.GREY),
+                                    ft.Text(f"₹{total_invested:,.2f}", size=18, weight=ft.FontWeight.BOLD),
+                                ]
+                            ),
+                            ft.Column(
+                                [
+                                    ft.Text("Current Value", size=12, color=ft.Colors.GREY),
+                                    ft.Text(f"₹{total_current:,.2f}", size=18, weight=ft.FontWeight.BOLD),
+                                ]
+                            ),
+                        ],
+                        spacing=40,
+                    ),
+                    ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.TRENDING_UP if gain_loss >= 0 else ft.Icons.TRENDING_DOWN,
+                                color=gain_color,
+                            ),
+                            ft.Text(
+                                f"{'+' if gain_loss >= 0 else ''}₹{gain_loss:,.2f} ({gain_pct:+.1f}%)",
+                                color=gain_color,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                        ]
+                    ),
+                ],
+                spacing=10,
+            )
+        )
+
+        new_invest_card = card(
+            ft.Column(
+                [
+                    ft.Text("Add Investment", size=14, color=ft.Colors.GREY),
+                    invest_name_field,
+                    invest_amount_field,
+                    ft.ElevatedButton("Add", on_click=submit_investment, width=200),
+                    invest_feedback,
+                ],
+                spacing=12,
+            )
+        )
+
+        def investment_row(inv):
+            gl = inv["current_value"] - inv["amount_invested"]
+            gl_color = ft.Colors.GREEN if gl >= 0 else ft.Colors.RED
+            gl_pct = (gl / inv["amount_invested"] * 100) if inv["amount_invested"] else 0
+            return ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                ft.Text(inv["name"], weight=ft.FontWeight.W_600),
+                                ft.Text(f"Invested ₹{inv['amount_invested']:,.2f} · {inv['date_added']}", size=12, color=ft.Colors.GREY),
+                            ],
+                            spacing=2,
+                            expand=True,
+                        ),
+                        ft.Column(
+                            [
+                                ft.Text(f"₹{inv['current_value']:,.2f}", weight=ft.FontWeight.BOLD),
+                                ft.Text(f"{'+' if gl >= 0 else ''}{gl_pct:.1f}%", size=12, color=gl_color),
+                                ft.TextButton(
+                                    "Update",
+                                    on_click=lambda e, iid=inv["id"], cv=inv["current_value"]: open_update_dialog(iid, cv),
+                                ),
+                            ],
+                            horizontal_alignment=ft.CrossAxisAlignment.END,
+                            spacing=2,
+                        ),
+                    ]
+                ),
+                padding=ft.Padding.symmetric(vertical=6),
+            )
+
+        investments = db.get_investments()
+        rows = [investment_row(i) for i in investments] or [ft.Text("No investments yet", color=ft.Colors.GREY)]
+        list_card = card(
+            ft.Column([ft.Text("Your Investments", size=14, color=ft.Colors.GREY), ft.Divider(height=1)] + rows, spacing=4)
+        )
+
+        invest_content.controls.extend([totals_card, new_invest_card, list_card])
+        page.update()
+
+    def submit_investment(e):
+        invest_feedback.value = ""
+        try:
+            amount = float(invest_amount_field.value)
+            if amount <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            invest_amount_field.error_text = "Enter a valid amount"
+            page.update()
+            return
+
+        if not invest_name_field.value:
+            invest_feedback.value = "Enter an investment name"
+            invest_feedback.color = ft.Colors.RED
+            page.update()
+            return
+
+        db.add_investment(name=invest_name_field.value, amount_invested=amount)
+
+        invest_name_field.value = ""
+        invest_amount_field.value = ""
+        invest_amount_field.error_text = None
+        invest_feedback.value = "Added!"
+        invest_feedback.color = ft.Colors.GREEN
+
+        build_invest()
+        page.update()
     stats_content = placeholder("Stats — coming next stage")
 
     # ---------------------------------------------------------------
@@ -460,6 +630,8 @@ def main(page: ft.Page):
             build_home()
         elif index == 2:
             build_loans()
+        elif index == 3:
+            build_invest()
         refresh_account_dropdown()
         body.content = views[index]
         page.update()

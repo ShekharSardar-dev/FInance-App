@@ -307,3 +307,57 @@ def get_loan_totals():
     ).fetchone()[0]
     conn.close()
     return owed_to_you, you_owe
+
+# ---------------------------------------------------------------------
+# INVESTMENTS
+# ---------------------------------------------------------------------
+
+def add_investment(name, amount_invested, current_value=None, date_added=None):
+    """current_value defaults to amount_invested if not given — makes sense
+    for a brand new investment where you haven't checked its value yet."""
+    current_value = current_value if current_value is not None else amount_invested
+    date_added = date_added or date.today().isoformat()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO investments (name, amount_invested, current_value, date_added) VALUES (?, ?, ?, ?)",
+        (name, amount_invested, current_value, date_added),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_investments():
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, name, amount_invested, current_value, date_added FROM investments ORDER BY date_added DESC, id DESC"
+    ).fetchall()
+    conn.close()
+    columns = ["id", "name", "amount_invested", "current_value", "date_added"]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def update_investment_value(investment_id, new_current_value):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE investments SET current_value = ? WHERE id = ?",
+        (new_current_value, investment_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_investment(investment_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM investments WHERE id = ?", (investment_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_investment_totals():
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_invested), 0), COALESCE(SUM(current_value), 0) FROM investments"
+    ).fetchone()
+    conn.close()
+    total_invested, total_current = row
+    return total_invested, total_current, total_current - total_invested
