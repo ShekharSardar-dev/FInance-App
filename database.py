@@ -1,4 +1,5 @@
 import sqlite3
+import hashlib
 from datetime import date
 
 DB_NAME = "finance.db"
@@ -23,7 +24,30 @@ def init_db():
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
-            balance REAL NOT NULL DEFAULT 0
+            balance REAL NOT NULL DEFAULT 0,
+            category TEXT NOT NULL DEFAULT 'bank',
+            account_type TEXT,
+            account_number TEXT
+        )
+    """)
+
+    # Migration: add new columns if this accounts table predates them.
+    existing_account_cols = [row[1] for row in cur.execute("PRAGMA table_info(accounts)").fetchall()]
+    if "category" not in existing_account_cols:
+        cur.execute("ALTER TABLE accounts ADD COLUMN category TEXT NOT NULL DEFAULT 'bank'")
+    if "account_type" not in existing_account_cols:
+        cur.execute("ALTER TABLE accounts ADD COLUMN account_type TEXT")
+    if "account_number" not in existing_account_cols:
+        cur.execute("ALTER TABLE accounts ADD COLUMN account_number TEXT")
+    # Any pre-existing account literally named "Cash" should be tagged as cash,
+    # not bank, so it's correctly excluded from the Invest tab.
+    cur.execute("UPDATE accounts SET category = 'cash' WHERE name = 'Cash' AND category != 'cash'")
+
+    # Simple key-value settings store \u2014 used for the account-number PIN.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     """)
 
@@ -90,9 +114,31 @@ def init_db():
         CREATE TABLE IF NOT EXISTS investments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'Other',
             amount_invested REAL NOT NULL,
             current_value REAL NOT NULL,
             date_added TEXT NOT NULL
+        )
+    """)
+
+    # Migration: if you already had an investments table from before the
+    # "type" column existed, add it now without losing existing data.
+    existing_cols = [row[1] for row in cur.execute("PRAGMA table_info(investments)").fetchall()]
+    if "type" not in existing_cols:
+        cur.execute("ALTER TABLE investments ADD COLUMN type TEXT NOT NULL DEFAULT 'Other'")
+
+    # Every buy/withdraw against an investment, for history + realized gain tracking.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS investment_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            investment_id INTEGER NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('buy', 'withdraw')),
+            amount REAL NOT NULL,
+            realized_gain REAL NOT NULL DEFAULT 0,
+            account_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            FOREIGN KEY (investment_id) REFERENCES investments(id),
+            FOREIGN KEY (account_id) REFERENCES accounts(id)
         )
     """)
 
@@ -108,26 +154,65 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 # ---------------------------------------------------------------------
 # ACCOUNTS
 # ---------------------------------------------------------------------
 
-def add_account(name, starting_balance=0):
+def add_account(name, starting_balance=0, category="bank", account_type=None, account_number=None):
     conn = get_connection()
     conn.execute(
-        "INSERT INTO accounts (name, balance) VALUES (?, ?)",
-        (name, starting_balance),
+        "INSERT INTO accounts (name, balance, category, account_type, account_number) VALUES (?, ?, ?, ?, ?)",
+        (name, starting_balance, category, account_type, account_number),
     )
     conn.commit()
     conn.close()
 
 
 def get_accounts():
-    """Returns a list of (id, name, balance) tuples for every account."""
+    """Returns (id, name, balance) for every account \u2014 used by dropdowns
+    that don't care about bank details (Add Transaction, Loans)."""
     conn = get_connection()
-    rows = conn.execute("SELECT id, name, balance FROM accounts").fetchall()
+    rows = conn.execute("SELECT id, name, balance FROM accounts ORDER BY id").fetchall()
     conn.close()
     return rows
+
+
+def get_bank_accounts():
+    """Same as get_accounts(), but bank accounts only \u2014 used for the
+    Invest tab, since investing from/to a Cash account doesn't make sense here."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, name, balance FROM accounts WHERE category = 'bank' ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_default_account_id(prefer_category="bank"):
+    """Returns the id of the account that should be pre-selected by default
+    in dropdowns \u2014 the earliest-created account of the preferred category,
+    falling back to any account at all if none match."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id FROM accounts WHERE category = ? ORDER BY id LIMIT 1", (prefer_category,)
+    ).fetchone()
+    if not row:
+        row = conn.execute("SELECT id FROM accounts ORDER BY id LIMIT 1").fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def get_accounts_full():
+    """Returns full account details as dicts \u2014 used by the Manage Accounts
+    section on Home, which needs to show/mask the account number."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, name, balance, category, account_type, account_number FROM accounts ORDER BY id"
+    ).fetchall()
+    conn.close()
+    columns = ["id", "name", "balance", "category", "account_type", "account_number"]
+    return [dict(zip(columns, row)) for row in rows]
 
 
 def get_account_balance(account_id):
@@ -147,6 +232,94 @@ def _adjust_account_balance(conn, account_id, delta):
         "UPDATE accounts SET balance = balance + ? WHERE id = ?",
         (delta, account_id),
     )
+
+
+# ---------------------------------------------------------------------
+# SECURITY PIN (protects revealing full account numbers)
+# ---------------------------------------------------------------------
+
+def _hash_pin(pin):
+    return hashlib.sha256(pin.encode()).hexdigest()
+
+
+def has_pin_set():
+    conn = get_connection()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = 'pin_hash'").fetchone()
+    conn.close()
+    return row is not None
+
+
+def set_pin(pin):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('pin_hash', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (_hash_pin(pin),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def verify_pin(pin):
+    conn = get_connection()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = 'pin_hash'").fetchone()
+    conn.close()
+    if not row:
+        return False
+    return row[0] == _hash_pin(pin)
+
+
+def mask_account_number(account_number):
+    """Turns '1234567890123456' into '**** **** **** 3456'."""
+    if not account_number:
+        return ""
+    last4 = account_number[-4:]
+    return f"**** **** **** {last4}"
+
+
+def account_has_history(account_id):
+    """Checks whether an account is referenced anywhere else \u2014 transactions,
+    loans, repayments, or investment purchases \u2014 so we don't delete an
+    account and leave orphaned records pointing at nothing."""
+    conn = get_connection()
+    checks = [
+        "SELECT 1 FROM transactions WHERE account_id = ? LIMIT 1",
+        "SELECT 1 FROM loans WHERE account_id = ? LIMIT 1",
+        "SELECT 1 FROM loan_repayments WHERE account_id = ? LIMIT 1",
+        "SELECT 1 FROM investment_transactions WHERE account_id = ? LIMIT 1",
+    ]
+    found = any(conn.execute(q, (account_id,)).fetchone() for q in checks)
+    conn.close()
+    return found
+
+
+def update_account(account_id, name=None, account_type=None, account_number=None, balance=None):
+    conn = get_connection()
+    fields, params = [], []
+    if name is not None:
+        fields.append("name = ?"); params.append(name)
+    if account_type is not None:
+        fields.append("account_type = ?"); params.append(account_type)
+    if account_number is not None:
+        fields.append("account_number = ?"); params.append(account_number)
+    if balance is not None:
+        fields.append("balance = ?"); params.append(balance)
+    if fields:
+        params.append(account_id)
+        conn.execute(f"UPDATE accounts SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+    conn.close()
+
+
+def delete_account(account_id):
+    """Only deletes if nothing else references this account, to keep the
+    rest of your data intact."""
+    if account_has_history(account_id):
+        raise ValueError("Can't delete an account that already has transaction history.")
+    conn = get_connection()
+    conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------
@@ -210,9 +383,96 @@ def get_monthly_cash_flow(year_month=None):
     return income, expense, income - expense
 
 
+# ---------------------------------------------------------------------
+# STATS (category breakdown, trend, budgets)
+# ---------------------------------------------------------------------
+
+def get_category_spending(year_month=None):
+    """Returns [(category, total_spent), ...] for expenses in a given
+    month, highest spend first. Powers the Stats pie chart."""
+    year_month = year_month or date.today().isoformat()[:7]
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT category, SUM(amount) FROM transactions
+           WHERE type = 'expense' AND date LIKE ?
+           GROUP BY category ORDER BY SUM(amount) DESC""",
+        (f"{year_month}%",),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_cash_flow_trend(months=6):
+    """Returns [(year_month, income, expense), ...] for the last `months`
+    months in chronological order (oldest first), for the Stats trend chart."""
+    conn = get_connection()
+    today = date.today()
+    results = []
+    for i in range(months - 1, -1, -1):
+        # Walk back month by month without needing extra libraries.
+        year = today.year
+        month = today.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        ym = f"{year:04d}-{month:02d}"
+
+        income = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'income' AND date LIKE ?",
+            (f"{ym}%",),
+        ).fetchone()[0]
+        expense = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense' AND date LIKE ?",
+            (f"{ym}%",),
+        ).fetchone()[0]
+        results.append((ym, income, expense))
+
+    conn.close()
+    return results
+
+
+def set_budget(category, monthly_limit):
+    """Creates or updates the budget for a category (one budget per category)."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO budgets (category, monthly_limit) VALUES (?, ?) "
+        "ON CONFLICT(category) DO UPDATE SET monthly_limit = excluded.monthly_limit",
+        (category, monthly_limit),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_budgets():
+    """Returns each budget along with how much has actually been spent on
+    that category this month, so the UI can draw a progress bar directly."""
+    year_month = date.today().isoformat()[:7]
+    conn = get_connection()
+    budget_rows = conn.execute("SELECT id, category, monthly_limit FROM budgets ORDER BY category").fetchall()
+
+    results = []
+    for budget_id, category, limit in budget_rows:
+        spent = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense' AND category = ? AND date LIKE ?",
+            (category, f"{year_month}%"),
+        ).fetchone()[0]
+        results.append({"id": budget_id, "category": category, "monthly_limit": limit, "spent": spent})
+
+    conn.close()
+    return results
+
+
+def delete_budget(budget_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM budgets WHERE id = ?", (budget_id,))
+    conn.commit()
+    conn.close()
+
+
 if __name__ == "__main__":
     init_db()
     print("Database initialized: finance.db created with all tables.")
+
 
 # ---------------------------------------------------------------------
 # LOANS (lending / borrowing)
@@ -308,31 +568,117 @@ def get_loan_totals():
     conn.close()
     return owed_to_you, you_owe
 
+
 # ---------------------------------------------------------------------
 # INVESTMENTS
 # ---------------------------------------------------------------------
 
-def add_investment(name, amount_invested, current_value=None, date_added=None):
-    """current_value defaults to amount_invested if not given — makes sense
-    for a brand new investment where you haven't checked its value yet."""
+def add_investment(name, amount_invested, account_id, investment_type="Other", current_value=None, date_added=None):
+    """Buying a new investment moves real cash out of an account \u2014 so we
+    deduct the account balance, same as we do for loans (it's not counted
+    as an 'expense' in cash flow, since it's converted into an asset, not spent)."""
     current_value = current_value if current_value is not None else amount_invested
     date_added = date_added or date.today().isoformat()
     conn = get_connection()
-    conn.execute(
-        "INSERT INTO investments (name, amount_invested, current_value, date_added) VALUES (?, ?, ?, ?)",
-        (name, amount_invested, current_value, date_added),
+
+    cur = conn.execute(
+        "INSERT INTO investments (name, type, amount_invested, current_value, date_added) VALUES (?, ?, ?, ?, ?)",
+        (name, investment_type, amount_invested, current_value, date_added),
     )
+    investment_id = cur.lastrowid
+
+    conn.execute(
+        "INSERT INTO investment_transactions (investment_id, type, amount, realized_gain, account_id, date) VALUES (?, 'buy', ?, 0, ?, ?)",
+        (investment_id, amount_invested, account_id, date_added),
+    )
+    _adjust_account_balance(conn, account_id, -amount_invested)
+
     conn.commit()
     conn.close()
+
+
+def buy_more_investment(investment_id, amount, account_id, buy_date=None):
+    """Adds to an existing investment. Assumes you're buying at the current
+    market price, so both invested amount and current value go up by the
+    same amount (no instant paper gain/loss from the purchase itself)."""
+    buy_date = buy_date or date.today().isoformat()
+    conn = get_connection()
+
+    conn.execute(
+        "UPDATE investments SET amount_invested = amount_invested + ?, current_value = current_value + ? WHERE id = ?",
+        (amount, amount, investment_id),
+    )
+    conn.execute(
+        "INSERT INTO investment_transactions (investment_id, type, amount, realized_gain, account_id, date) VALUES (?, 'buy', ?, 0, ?, ?)",
+        (investment_id, amount, account_id, buy_date),
+    )
+    _adjust_account_balance(conn, account_id, -amount)
+
+    conn.commit()
+    conn.close()
+
+
+def withdraw_investment(investment_id, amount, account_id, withdraw_date=None):
+    """Withdraws (sells) part or all of an investment. `amount` is based on
+    CURRENT value (what it's worth now), not the original cost. We shrink
+    the cost basis proportionally, so gain/loss tracking stays accurate,
+    and credit the withdrawn cash back into an account."""
+    withdraw_date = withdraw_date or date.today().isoformat()
+    conn = get_connection()
+
+    row = conn.execute(
+        "SELECT amount_invested, current_value FROM investments WHERE id = ?", (investment_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError("Investment not found")
+
+    amount_invested, current_value = row
+    if amount > current_value:
+        conn.close()
+        raise ValueError("Cannot withdraw more than the current value")
+
+    proportion = amount / current_value if current_value else 0
+    invested_reduction = amount_invested * proportion
+    realized_gain = amount - invested_reduction
+
+    conn.execute(
+        "UPDATE investments SET amount_invested = amount_invested - ?, current_value = current_value - ? WHERE id = ?",
+        (invested_reduction, amount, investment_id),
+    )
+    conn.execute(
+        "INSERT INTO investment_transactions (investment_id, type, amount, realized_gain, account_id, date) VALUES (?, 'withdraw', ?, ?, ?, ?)",
+        (investment_id, amount, realized_gain, account_id, withdraw_date),
+    )
+    _adjust_account_balance(conn, account_id, amount)
+
+    conn.commit()
+    conn.close()
+    return realized_gain
 
 
 def get_investments():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, name, amount_invested, current_value, date_added FROM investments ORDER BY date_added DESC, id DESC"
+        "SELECT id, name, type, amount_invested, current_value, date_added FROM investments ORDER BY date_added DESC, id DESC"
     ).fetchall()
     conn.close()
-    columns = ["id", "name", "amount_invested", "current_value", "date_added"]
+    columns = ["id", "name", "type", "amount_invested", "current_value", "date_added"]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def get_investment_transactions(investment_id):
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT it.type, it.amount, it.realized_gain, it.date, a.name
+           FROM investment_transactions it
+           JOIN accounts a ON it.account_id = a.id
+           WHERE it.investment_id = ?
+           ORDER BY it.date DESC, it.id DESC""",
+        (investment_id,),
+    ).fetchall()
+    conn.close()
+    columns = ["type", "amount", "realized_gain", "date", "account_name"]
     return [dict(zip(columns, row)) for row in rows]
 
 
@@ -346,14 +692,47 @@ def update_investment_value(investment_id, new_current_value):
     conn.close()
 
 
-def delete_investment(investment_id):
+def update_investment_details(investment_id, name=None, investment_type=None):
+    """Edits just the label/type \u2014 amount/value changes go through
+    buy_more_investment / withdraw_investment / update_investment_value
+    instead, so history and account balances stay accurate."""
     conn = get_connection()
+    fields, params = [], []
+    if name is not None:
+        fields.append("name = ?"); params.append(name)
+    if investment_type is not None:
+        fields.append("type = ?"); params.append(investment_type)
+    if fields:
+        params.append(investment_id)
+        conn.execute(f"UPDATE investments SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+    conn.close()
+
+
+def delete_investment(investment_id):
+    """Deleting an investment reverses every buy/withdraw it ever had back
+    into the accounts they came from/went to, so balances end up exactly
+    as if the investment had never existed, then removes it entirely."""
+    conn = get_connection()
+    txns = conn.execute(
+        "SELECT type, amount, account_id FROM investment_transactions WHERE investment_id = ?",
+        (investment_id,),
+    ).fetchall()
+
+    for txn_type, amount, account_id in txns:
+        # A 'buy' had taken money OUT of the account, so reverse = give it back.
+        # A 'withdraw' had put money IN, so reverse = take it back out.
+        delta = amount if txn_type == "buy" else -amount
+        _adjust_account_balance(conn, account_id, delta)
+
+    conn.execute("DELETE FROM investment_transactions WHERE investment_id = ?", (investment_id,))
     conn.execute("DELETE FROM investments WHERE id = ?", (investment_id,))
     conn.commit()
     conn.close()
 
 
 def get_investment_totals():
+    """Returns (total_invested, total_current_value, total_gain_loss)."""
     conn = get_connection()
     row = conn.execute(
         "SELECT COALESCE(SUM(amount_invested), 0), COALESCE(SUM(current_value), 0) FROM investments"
