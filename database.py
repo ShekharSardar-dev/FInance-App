@@ -277,6 +277,51 @@ def mask_account_number(account_number):
     return f"**** **** **** {last4}"
 
 
+def account_has_history(account_id):
+    """Checks whether an account is referenced anywhere else \u2014 transactions,
+    loans, repayments, or investment purchases \u2014 so we don't delete an
+    account and leave orphaned records pointing at nothing."""
+    conn = get_connection()
+    checks = [
+        "SELECT 1 FROM transactions WHERE account_id = ? LIMIT 1",
+        "SELECT 1 FROM loans WHERE account_id = ? LIMIT 1",
+        "SELECT 1 FROM loan_repayments WHERE account_id = ? LIMIT 1",
+        "SELECT 1 FROM investment_transactions WHERE account_id = ? LIMIT 1",
+    ]
+    found = any(conn.execute(q, (account_id,)).fetchone() for q in checks)
+    conn.close()
+    return found
+
+
+def update_account(account_id, name=None, account_type=None, account_number=None, balance=None):
+    conn = get_connection()
+    fields, params = [], []
+    if name is not None:
+        fields.append("name = ?"); params.append(name)
+    if account_type is not None:
+        fields.append("account_type = ?"); params.append(account_type)
+    if account_number is not None:
+        fields.append("account_number = ?"); params.append(account_number)
+    if balance is not None:
+        fields.append("balance = ?"); params.append(balance)
+    if fields:
+        params.append(account_id)
+        conn.execute(f"UPDATE accounts SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+    conn.close()
+
+
+def delete_account(account_id):
+    """Only deletes if nothing else references this account, to keep the
+    rest of your data intact."""
+    if account_has_history(account_id):
+        raise ValueError("Can't delete an account that already has transaction history.")
+    conn = get_connection()
+    conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+    conn.commit()
+    conn.close()
+
+
 # ---------------------------------------------------------------------
 # TRANSACTIONS
 # ---------------------------------------------------------------------
@@ -336,6 +381,92 @@ def get_monthly_cash_flow(year_month=None):
 
     conn.close()
     return income, expense, income - expense
+
+
+# ---------------------------------------------------------------------
+# STATS (category breakdown, trend, budgets)
+# ---------------------------------------------------------------------
+
+def get_category_spending(year_month=None):
+    """Returns [(category, total_spent), ...] for expenses in a given
+    month, highest spend first. Powers the Stats pie chart."""
+    year_month = year_month or date.today().isoformat()[:7]
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT category, SUM(amount) FROM transactions
+           WHERE type = 'expense' AND date LIKE ?
+           GROUP BY category ORDER BY SUM(amount) DESC""",
+        (f"{year_month}%",),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_cash_flow_trend(months=6):
+    """Returns [(year_month, income, expense), ...] for the last `months`
+    months in chronological order (oldest first), for the Stats trend chart."""
+    conn = get_connection()
+    today = date.today()
+    results = []
+    for i in range(months - 1, -1, -1):
+        # Walk back month by month without needing extra libraries.
+        year = today.year
+        month = today.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        ym = f"{year:04d}-{month:02d}"
+
+        income = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'income' AND date LIKE ?",
+            (f"{ym}%",),
+        ).fetchone()[0]
+        expense = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense' AND date LIKE ?",
+            (f"{ym}%",),
+        ).fetchone()[0]
+        results.append((ym, income, expense))
+
+    conn.close()
+    return results
+
+
+def set_budget(category, monthly_limit):
+    """Creates or updates the budget for a category (one budget per category)."""
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO budgets (category, monthly_limit) VALUES (?, ?) "
+        "ON CONFLICT(category) DO UPDATE SET monthly_limit = excluded.monthly_limit",
+        (category, monthly_limit),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_budgets():
+    """Returns each budget along with how much has actually been spent on
+    that category this month, so the UI can draw a progress bar directly."""
+    year_month = date.today().isoformat()[:7]
+    conn = get_connection()
+    budget_rows = conn.execute("SELECT id, category, monthly_limit FROM budgets ORDER BY category").fetchall()
+
+    results = []
+    for budget_id, category, limit in budget_rows:
+        spent = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense' AND category = ? AND date LIKE ?",
+            (category, f"{year_month}%"),
+        ).fetchone()[0]
+        results.append({"id": budget_id, "category": category, "monthly_limit": limit, "spent": spent})
+
+    conn.close()
+    return results
+
+
+def delete_budget(budget_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM budgets WHERE id = ?", (budget_id,))
+    conn.commit()
+    conn.close()
 
 
 if __name__ == "__main__":
@@ -561,8 +692,39 @@ def update_investment_value(investment_id, new_current_value):
     conn.close()
 
 
-def delete_investment(investment_id):
+def update_investment_details(investment_id, name=None, investment_type=None):
+    """Edits just the label/type \u2014 amount/value changes go through
+    buy_more_investment / withdraw_investment / update_investment_value
+    instead, so history and account balances stay accurate."""
     conn = get_connection()
+    fields, params = [], []
+    if name is not None:
+        fields.append("name = ?"); params.append(name)
+    if investment_type is not None:
+        fields.append("type = ?"); params.append(investment_type)
+    if fields:
+        params.append(investment_id)
+        conn.execute(f"UPDATE investments SET {', '.join(fields)} WHERE id = ?", params)
+        conn.commit()
+    conn.close()
+
+
+def delete_investment(investment_id):
+    """Deleting an investment reverses every buy/withdraw it ever had back
+    into the accounts they came from/went to, so balances end up exactly
+    as if the investment had never existed, then removes it entirely."""
+    conn = get_connection()
+    txns = conn.execute(
+        "SELECT type, amount, account_id FROM investment_transactions WHERE investment_id = ?",
+        (investment_id,),
+    ).fetchall()
+
+    for txn_type, amount, account_id in txns:
+        # A 'buy' had taken money OUT of the account, so reverse = give it back.
+        # A 'withdraw' had put money IN, so reverse = take it back out.
+        delta = amount if txn_type == "buy" else -amount
+        _adjust_account_balance(conn, account_id, delta)
+
     conn.execute("DELETE FROM investment_transactions WHERE investment_id = ?", (investment_id,))
     conn.execute("DELETE FROM investments WHERE id = ?", (investment_id,))
     conn.commit()
