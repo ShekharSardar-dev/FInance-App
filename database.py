@@ -241,6 +241,22 @@ def _adjust_account_balance(conn, account_id, delta):
 def _hash_pin(pin):
     return hashlib.sha256(pin.encode()).hexdigest()
 
+def has_completed_setup():
+    conn = get_connection()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = 'setup_complete'").fetchone()
+    conn.close()
+    return row is not None
+
+
+def mark_setup_complete():
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('setup_complete', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    )
+    conn.commit()
+    conn.close()
+
 
 def has_pin_set():
     conn = get_connection()
@@ -468,6 +484,77 @@ def delete_budget(budget_id):
     conn.commit()
     conn.close()
 
+def shift_month(months_ago, from_year_month=None):
+    """Returns the 'YYYY-MM' string for `months_ago` months before
+    `from_year_month` (defaults to the current month). Used anywhere we
+    need to look at a previous month, e.g. month-over-month comparisons."""
+    if from_year_month:
+        year, month = (int(x) for x in from_year_month.split("-"))
+    else:
+        today = date.today()
+        year, month = today.year, today.month
+
+    month -= months_ago
+    while month <= 0:
+        month += 12
+        year -= 1
+    return f"{year:04d}-{month:02d}"
+
+
+def get_net_worth():
+    """Returns a breakdown dict: cash_and_bank, investments_value,
+    owed_to_you, you_owe, and the total net_worth."""
+    accounts = get_accounts_full()
+    cash_and_bank = sum(a["balance"] for a in accounts)
+
+    _invested, investments_value, _gain = get_investment_totals()
+    owed_to_you, you_owe = get_loan_totals()
+
+    net_worth = cash_and_bank + investments_value + owed_to_you - you_owe
+    return {
+        "cash_and_bank": cash_and_bank,
+        "investments_value": investments_value,
+        "owed_to_you": owed_to_you,
+        "you_owe": you_owe,
+        "net_worth": net_worth,
+    }
+
+
+def get_top_expenses(year_month=None, limit=5):
+    """Returns the biggest individual expenses in a month, not grouped by
+    category — useful for spotting one-off big spends."""
+    year_month = year_month or date.today().isoformat()[:7]
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT t.category, t.amount, t.note, t.date, a.name
+           FROM transactions t
+           JOIN accounts a ON t.account_id = a.id
+           WHERE t.type = 'expense' AND t.date LIKE ?
+           ORDER BY t.amount DESC
+           LIMIT ?""",
+        (f"{year_month}%", limit),
+    ).fetchall()
+    conn.close()
+    columns = ["category", "amount", "note", "date", "account_name"]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def get_transactions_by_category(category, year_month=None):
+    """Every transaction in a given category for a given month — powers
+    tapping a category in the Stats breakdown to see what's behind it."""
+    year_month = year_month or date.today().isoformat()[:7]
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT t.amount, t.note, t.date, a.name
+           FROM transactions t
+           JOIN accounts a ON t.account_id = a.id
+           WHERE t.type = 'expense' AND t.category = ? AND t.date LIKE ?
+           ORDER BY t.date DESC, t.id DESC""",
+        (category, f"{year_month}%"),
+    ).fetchall()
+    conn.close()
+    columns = ["amount", "note", "date", "account_name"]
+    return [dict(zip(columns, row)) for row in rows]
 
 if __name__ == "__main__":
     init_db()

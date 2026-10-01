@@ -50,7 +50,7 @@ def main(page: ft.Page):
     pin_entry_field = ft.TextField(label="Enter PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
     pin_confirm_field = ft.TextField(label="Confirm PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
     pin_error = ft.Text("", color=ft.Colors.RED)
-    pin_state = {"account_id": None}
+    pin_state = {"account_id": None, "on_success": None}
 
     def close_pin_dialog(e=None):
         page.pop_dialog()
@@ -75,9 +75,12 @@ def main(page: ft.Page):
                 return
             db.set_pin(pin)
 
-        revealed_accounts[pin_state["account_id"]] = True
         page.pop_dialog()
-        build_home()
+        if pin_state["on_success"]:
+            pin_state["on_success"]()
+        else:
+            revealed_accounts[pin_state["account_id"]] = True
+            build_home()
         page.update()
 
     pin_dialog = ft.AlertDialog(
@@ -90,8 +93,9 @@ def main(page: ft.Page):
         ],
     )
 
-    def open_pin_dialog(account_id):
+    def open_pin_dialog(account_id=None, on_success=None):
         pin_state["account_id"] = account_id
+        pin_state["on_success"] = on_success
         pin_entry_field.value = ""
         pin_confirm_field.value = ""
         pin_error.value = ""
@@ -118,6 +122,20 @@ def main(page: ft.Page):
     def close_add_bank_dialog(e=None):
         page.pop_dialog()
 
+    def actually_save_new_bank():
+        db.add_account(
+            name=new_bank_name_field.value,
+            starting_balance=float(new_bank_balance_field.value),
+            category="bank",
+            account_type=new_bank_type_dropdown.value,
+            account_number=new_bank_number_field.value or None,
+        )
+        new_bank_name_field.value = ""
+        new_bank_type_dropdown.value = None
+        new_bank_number_field.value = ""
+        new_bank_balance_field.value = ""
+        build_home()
+
     def confirm_add_bank(e):
         new_bank_error.value = ""
         if not new_bank_name_field.value:
@@ -133,21 +151,8 @@ def main(page: ft.Page):
             page.update()
             return
 
-        db.add_account(
-            name=new_bank_name_field.value,
-            starting_balance=balance,
-            category="bank",
-            account_type=new_bank_type_dropdown.value,
-            account_number=new_bank_number_field.value or None,
-        )
-
-        new_bank_name_field.value = ""
-        new_bank_type_dropdown.value = None
-        new_bank_number_field.value = ""
-        new_bank_balance_field.value = ""
         page.pop_dialog()
-        build_home()
-        page.update()
+        open_pin_dialog(on_success=actually_save_new_bank)
 
     add_bank_dialog = ft.AlertDialog(
         modal=True,
@@ -220,7 +225,7 @@ def main(page: ft.Page):
         ],
     )
 
-    def open_edit_account_dialog(acc):
+    def show_edit_account_dialog(acc):
         edit_acc_state["id"] = acc["id"]
         edit_acc_name_field.value = acc["name"]
         edit_acc_balance_field.value = str(acc["balance"])
@@ -231,6 +236,11 @@ def main(page: ft.Page):
         edit_acc_type_dropdown.value = acc["account_type"]
         edit_acc_number_field.value = acc["account_number"] or ""
         page.show_dialog(edit_account_dialog)
+
+    def open_edit_account_dialog(acc):
+        # Require the PIN before even opening the edit form, since it
+        # shows the full account number.
+        open_pin_dialog(on_success=lambda: show_edit_account_dialog(acc))
 
     # --- Delete Account confirmation ---
     delete_acc_error = ft.Text("", color=ft.Colors.RED)
@@ -1210,13 +1220,91 @@ def main(page: ft.Page):
         db.delete_budget(budget_id)
         build_stats()
 
+    category_txns_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text(""),
+        content=ft.Column([], tight=True, scroll=ft.ScrollMode.AUTO, height=300),
+        actions=[ft.TextButton("Close", on_click=lambda e: page.pop_dialog())],
+    )
+
+    def open_category_txns_dialog(category):
+        txns = db.get_transactions_by_category(category)
+        category_txns_dialog.title = ft.Text(f"{category} — This Month")
+
+        if not txns:
+            rows = [ft.Text("No transactions found", color=ft.Colors.GREY)]
+        else:
+            rows = []
+            for t in txns:
+                rows.append(
+                    ft.Row(
+                        [
+                            ft.Column(
+                                [
+                                    ft.Text(t["note"] or "No note", size=13),
+                                    ft.Text(f"{t['account_name']} · {t['date']}", size=11, color=ft.Colors.GREY),
+                                ],
+                                spacing=2,
+                                expand=True,
+                            ),
+                            ft.Text(f"₹{t['amount']:,.2f}", weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
+                        ]
+                    )
+                )
+                rows.append(ft.Divider(height=1))
+
+        category_txns_dialog.content = ft.Column(rows, tight=True, scroll=ft.ScrollMode.AUTO, height=300, spacing=8)
+        page.show_dialog(category_txns_dialog)
+
     def build_stats():
         stats_content.controls.clear()
+
+        nw = db.get_net_worth()
+        net_worth_card = card(
+            ft.Column(
+                [
+                    ft.Text("Net Worth", size=14, color=ft.Colors.GREY),
+                    ft.Text(f"₹{nw['net_worth']:,.2f}", size=24, weight=ft.FontWeight.BOLD),
+                    ft.Divider(height=1),
+                    ft.Row([ft.Text("Bank + Cash", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"₹{nw['cash_and_bank']:,.2f}", size=12)]),
+                    ft.Row([ft.Text("Investments", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"₹{nw['investments_value']:,.2f}", size=12)]),
+                    ft.Row([ft.Text("Owed to you", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"+₹{nw['owed_to_you']:,.2f}", size=12, color=ft.Colors.GREEN)]),
+                    ft.Row([ft.Text("You owe", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"-₹{nw['you_owe']:,.2f}", size=12, color=ft.Colors.RED)]),
+                ],
+                spacing=8,
+            )
+        )
+
+        income, expense, net = db.get_monthly_cash_flow()
+        savings_rate = (net / income * 100) if income else 0
+        savings_color = ft.Colors.GREEN if savings_rate >= 0 else ft.Colors.RED
+        savings_card = card(
+            ft.Row(
+                [
+                    ft.Column(
+                        [
+                            ft.Text("Savings Rate (This Month)", size=14, color=ft.Colors.GREY),
+                            ft.Text(f"{savings_rate:.0f}%", size=24, weight=ft.FontWeight.BOLD, color=savings_color),
+                        ],
+                        spacing=4,
+                        expand=True,
+                    ),
+                    ft.Text(
+                        f"You kept ₹{net:,.2f} of ₹{income:,.2f} earned" if income else "No income recorded yet this month",
+                        size=12,
+                        color=ft.Colors.GREY,
+                    ),
+                ]
+            )
+        )
 
         # --- Category breakdown pie chart ---
         spending = db.get_category_spending()
         categories = [c for c, _ in spending]
         total_spent = sum(amt for _, amt in spending)
+
+        prev_month = db.shift_month(1)
+        prev_spending = dict(db.get_category_spending(prev_month))
 
         if spending:
             sections = []
@@ -1233,17 +1321,34 @@ def main(page: ft.Page):
                         title_style=ft.TextStyle(size=12, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
                     )
                 )
+
+                prev_amt = prev_spending.get(cat, 0)
+                if prev_amt:
+                    change = (amt - prev_amt) / prev_amt * 100
+                    arrow = "↑" if change >= 0 else "↓"
+                    change_text = f"{arrow}{abs(change):.0f}%"
+                    change_color = ft.Colors.RED if change >= 0 else ft.Colors.GREEN
+                else:
+                    change_text = "New"
+                    change_color = ft.Colors.GREY
+
                 legend_rows.append(
-                    ft.Row(
-                        [
-                            ft.Container(width=10, height=10, bgcolor=color, border_radius=5),
-                            ft.Text(cat, size=12, expand=True),
-                            ft.Text(f"\u20b9{amt:,.2f}", size=12, weight=ft.FontWeight.BOLD),
-                        ],
-                        spacing=8,
+                    ft.Container(
+                        content=ft.Row(
+                            [
+                                ft.Container(width=10, height=10, bgcolor=color, border_radius=5),
+                                ft.Text(cat, size=12, expand=True),
+                                ft.Text(change_text, size=11, color=change_color),
+                                ft.Text(f"₹{amt:,.2f}", size=12, weight=ft.FontWeight.BOLD),
+                            ],
+                            spacing=8,
+                        ),
+                        on_click=lambda e, c=cat: open_category_txns_dialog(c),
+                        ink=True,
+                        border_radius=6,
+                        padding=ft.Padding.symmetric(vertical=2),
                     )
                 )
-
             pie_chart = fch.PieChart(
                 sections=sections,
                 sections_space=2,
@@ -1315,6 +1420,34 @@ def main(page: ft.Page):
             )
         )
 
+        top_expenses = db.get_top_expenses(limit=5)
+        top_rows = []
+        for t in top_expenses:
+            top_rows.append(
+                ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                ft.Text(t["category"], weight=ft.FontWeight.W_600, size=13),
+                                ft.Text(f"{t['note'] or 'No note'} · {t['date']}", size=11, color=ft.Colors.GREY),
+                            ],
+                            spacing=2,
+                            expand=True,
+                        ),
+                        ft.Text(f"₹{t['amount']:,.2f}", weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
+                    ]
+                )
+            )
+            top_rows.append(ft.Divider(height=1))
+
+        top_expenses_card = card(
+            ft.Column(
+                [ft.Text("Top 5 Expenses (This Month)", size=14, color=ft.Colors.GREY)]
+                + (top_rows if top_expenses else [ft.Text("No expenses yet", color=ft.Colors.GREY)]),
+                spacing=8,
+            )
+        )
+
         # --- Budgets ---
         budgets = db.get_budgets()
 
@@ -1358,7 +1491,7 @@ def main(page: ft.Page):
             )
         )
 
-        stats_content.controls.extend([category_card, trend_card, budgets_card])
+        stats_content.controls.extend([net_worth_card, savings_card, category_card, top_expenses_card, trend_card, budgets_card])
         page.update()
 
     # ---------------------------------------------------------------
@@ -1413,9 +1546,152 @@ def main(page: ft.Page):
     )
     page.navigation_bar = nav_bar
 
-    refresh_account_dropdown()
-    build_home()
-    page.add(body)
+        # ---------------------------------------------------------------
+    # FIRST-RUN SETUP
+    # ---------------------------------------------------------------
+    onboarding_cash_field = ft.TextField(label="Cash in hand", prefix=ft.Text("₹"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    onboarding_error = ft.Text("", color=ft.Colors.RED)
+
+    onboard_bank_name_field = ft.TextField(label="Bank name", border_color=ft.Colors.OUTLINE)
+    onboard_bank_type_dropdown = ft.Dropdown(
+        label="Account type", options=[ft.dropdown.Option("Savings"), ft.dropdown.Option("Current")], border_color=ft.Colors.OUTLINE
+    )
+    onboard_bank_number_field = ft.TextField(label="Account number (optional)", border_color=ft.Colors.OUTLINE)
+    onboard_bank_balance_field = ft.TextField(label="Available balance", prefix=ft.Text("₹"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    onboard_bank_error = ft.Text("", color=ft.Colors.RED)
+
+    def close_onboard_bank_dialog(e=None):
+        page.pop_dialog()
+
+    def actually_save_onboard_bank():
+        db.add_account(
+            name=onboard_bank_name_field.value,
+            starting_balance=float(onboard_bank_balance_field.value),
+            category="bank",
+            account_type=onboard_bank_type_dropdown.value,
+            account_number=onboard_bank_number_field.value or None,
+        )
+        onboard_bank_name_field.value = ""
+        onboard_bank_type_dropdown.value = None
+        onboard_bank_number_field.value = ""
+        onboard_bank_balance_field.value = ""
+        render_onboarding()
+
+    def confirm_onboard_bank(e):
+        onboard_bank_error.value = ""
+        if not onboard_bank_name_field.value:
+            onboard_bank_error.value = "Enter a bank name"
+            page.update()
+            return
+        try:
+            balance = float(onboard_bank_balance_field.value)
+            if balance < 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            onboard_bank_error.value = "Enter a valid balance"
+            page.update()
+            return
+
+        page.pop_dialog()
+        open_pin_dialog(on_success=actually_save_onboard_bank)
+
+    onboard_bank_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Add Bank Account"),
+        content=ft.Column(
+            [onboard_bank_name_field, onboard_bank_type_dropdown, onboard_bank_number_field, onboard_bank_balance_field, onboard_bank_error],
+            tight=True,
+            spacing=12,
+        ),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_onboard_bank_dialog),
+            ft.TextButton("Add", on_click=confirm_onboard_bank),
+        ],
+    )
+
+    def open_onboard_bank_dialog(e=None):
+        onboard_bank_error.value = ""
+        page.show_dialog(onboard_bank_dialog)
+
+    def finish_setup(e):
+        onboarding_error.value = ""
+        try:
+            cash_value = float(onboarding_cash_field.value) if onboarding_cash_field.value else 0
+            if cash_value < 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            onboarding_error.value = "Enter a valid cash amount"
+            page.update()
+            return
+
+        db.add_account(name="Cash", starting_balance=cash_value, category="cash")
+        db.mark_setup_complete()
+
+        page.controls.clear()
+        page.navigation_bar = nav_bar
+        refresh_account_dropdown()
+        build_home()
+        page.add(body)
+        page.update()
+
+    onboarding_view = ft.Container(padding=20, expand=True)
+
+    def render_onboarding():
+        bank_rows = [
+            ft.Row(
+                [
+                    ft.Text(name, weight=ft.FontWeight.W_600, expand=True),
+                    ft.Text(f"₹{balance:,.2f}", size=13, color=ft.Colors.GREY),
+                ]
+            )
+            for (_id, name, balance) in db.get_bank_accounts()
+        ]
+
+        onboarding_view.content = ft.Column(
+            [
+                ft.Text("Welcome!", size=26, weight=ft.FontWeight.BOLD),
+                ft.Text("Let's set up your accounts to get started.", size=14, color=ft.Colors.GREY),
+                ft.Container(height=10),
+                card(
+                    ft.Column(
+                        [
+                            ft.Text("Cash", size=14, color=ft.Colors.GREY),
+                            onboarding_cash_field,
+                        ],
+                        spacing=8,
+                    )
+                ),
+                card(
+                    ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text("Bank Accounts", size=14, color=ft.Colors.GREY, expand=True),
+                                    ft.TextButton("+ Add Bank", on_click=open_onboard_bank_dialog),
+                                ]
+                            ),
+                            ft.Divider(height=1),
+                        ]
+                        + (bank_rows or [ft.Text("No bank accounts added yet (optional)", size=12, color=ft.Colors.GREY)]),
+                        spacing=8,
+                    )
+                ),
+                onboarding_error,
+                ft.Button("Finish Setup", on_click=finish_setup, width=200),
+            ],
+            spacing=16,
+            scroll=ft.ScrollMode.AUTO,
+        )
+        page.update()
+
+    if db.has_completed_setup():
+        refresh_account_dropdown()
+        build_home()
+        page.navigation_bar = nav_bar
+        page.add(body)
+    else:
+        render_onboarding()
+        page.add(onboarding_view)
 
 
 ft.run(main)
