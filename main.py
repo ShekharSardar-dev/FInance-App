@@ -50,7 +50,7 @@ def main(page: ft.Page):
     pin_entry_field = ft.TextField(label="Enter PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
     pin_confirm_field = ft.TextField(label="Confirm PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
     pin_error = ft.Text("", color=ft.Colors.RED)
-    pin_state = {"account_id": None, "on_success": None}
+    pin_state = {"account_id": None}
 
     def close_pin_dialog(e=None):
         page.pop_dialog()
@@ -151,6 +151,8 @@ def main(page: ft.Page):
             page.update()
             return
 
+        # Form is valid \u2014 close this dialog and require the PIN before
+        # the bank account (with its account number) actually gets saved.
         page.pop_dialog()
         open_pin_dialog(on_success=actually_save_new_bank)
 
@@ -1220,6 +1222,7 @@ def main(page: ft.Page):
         db.delete_budget(budget_id)
         build_stats()
 
+    # --- Category transactions dialog (tap a category to see what's in it) ---
     category_txns_dialog = ft.AlertDialog(
         modal=True,
         title=ft.Text(""),
@@ -1229,7 +1232,7 @@ def main(page: ft.Page):
 
     def open_category_txns_dialog(category):
         txns = db.get_transactions_by_category(category)
-        category_txns_dialog.title = ft.Text(f"{category} — This Month")
+        category_txns_dialog.title = ft.Text(f"{category} \u2014 This Month")
 
         if not txns:
             rows = [ft.Text("No transactions found", color=ft.Colors.GREY)]
@@ -1242,12 +1245,12 @@ def main(page: ft.Page):
                             ft.Column(
                                 [
                                     ft.Text(t["note"] or "No note", size=13),
-                                    ft.Text(f"{t['account_name']} · {t['date']}", size=11, color=ft.Colors.GREY),
+                                    ft.Text(f"{t['account_name']} \u00b7 {t['date']}", size=11, color=ft.Colors.GREY),
                                 ],
                                 spacing=2,
                                 expand=True,
                             ),
-                            ft.Text(f"₹{t['amount']:,.2f}", weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
+                            ft.Text(f"\u20b9{t['amount']:,.2f}", weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
                         ]
                     )
                 )
@@ -1259,22 +1262,24 @@ def main(page: ft.Page):
     def build_stats():
         stats_content.controls.clear()
 
+        # --- Net worth snapshot ---
         nw = db.get_net_worth()
         net_worth_card = card(
             ft.Column(
                 [
                     ft.Text("Net Worth", size=14, color=ft.Colors.GREY),
-                    ft.Text(f"₹{nw['net_worth']:,.2f}", size=24, weight=ft.FontWeight.BOLD),
+                    ft.Text(f"\u20b9{nw['net_worth']:,.2f}", size=24, weight=ft.FontWeight.BOLD),
                     ft.Divider(height=1),
-                    ft.Row([ft.Text("Bank + Cash", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"₹{nw['cash_and_bank']:,.2f}", size=12)]),
-                    ft.Row([ft.Text("Investments", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"₹{nw['investments_value']:,.2f}", size=12)]),
-                    ft.Row([ft.Text("Owed to you", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"+₹{nw['owed_to_you']:,.2f}", size=12, color=ft.Colors.GREEN)]),
-                    ft.Row([ft.Text("You owe", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"-₹{nw['you_owe']:,.2f}", size=12, color=ft.Colors.RED)]),
+                    ft.Row([ft.Text("Bank + Cash", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"\u20b9{nw['cash_and_bank']:,.2f}", size=12)]),
+                    ft.Row([ft.Text("Investments", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"\u20b9{nw['investments_value']:,.2f}", size=12)]),
+                    ft.Row([ft.Text("Owed to you", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"+\u20b9{nw['owed_to_you']:,.2f}", size=12, color=ft.Colors.GREEN)]),
+                    ft.Row([ft.Text("You owe", size=12, color=ft.Colors.GREY, expand=True), ft.Text(f"-\u20b9{nw['you_owe']:,.2f}", size=12, color=ft.Colors.RED)]),
                 ],
                 spacing=8,
             )
         )
 
+        # --- Savings rate ---
         income, expense, net = db.get_monthly_cash_flow()
         savings_rate = (net / income * 100) if income else 0
         savings_color = ft.Colors.GREEN if savings_rate >= 0 else ft.Colors.RED
@@ -1290,7 +1295,7 @@ def main(page: ft.Page):
                         expand=True,
                     ),
                     ft.Text(
-                        f"You kept ₹{net:,.2f} of ₹{income:,.2f} earned" if income else "No income recorded yet this month",
+                        f"You kept \u20b9{net:,.2f} of \u20b9{income:,.2f} earned" if income else "No income recorded yet this month",
                         size=12,
                         color=ft.Colors.GREY,
                     ),
@@ -1325,8 +1330,7 @@ def main(page: ft.Page):
                 prev_amt = prev_spending.get(cat, 0)
                 if prev_amt:
                     change = (amt - prev_amt) / prev_amt * 100
-                    arrow = "↑" if change >= 0 else "↓"
-                    change_text = f"{arrow}{abs(change):.0f}%"
+                    change_text = f"{'\u2191' if change >= 0 else '\u2193'}{abs(change):.0f}%"
                     change_color = ft.Colors.RED if change >= 0 else ft.Colors.GREEN
                 else:
                     change_text = "New"
@@ -1339,7 +1343,7 @@ def main(page: ft.Page):
                                 ft.Container(width=10, height=10, bgcolor=color, border_radius=5),
                                 ft.Text(cat, size=12, expand=True),
                                 ft.Text(change_text, size=11, color=change_color),
-                                ft.Text(f"₹{amt:,.2f}", size=12, weight=ft.FontWeight.BOLD),
+                                ft.Text(f"\u20b9{amt:,.2f}", size=12, weight=ft.FontWeight.BOLD),
                             ],
                             spacing=8,
                         ),
@@ -1349,6 +1353,7 @@ def main(page: ft.Page):
                         padding=ft.Padding.symmetric(vertical=2),
                     )
                 )
+
             pie_chart = fch.PieChart(
                 sections=sections,
                 sections_space=2,
@@ -1420,6 +1425,7 @@ def main(page: ft.Page):
             )
         )
 
+        # --- Top 5 biggest expenses this month ---
         top_expenses = db.get_top_expenses(limit=5)
         top_rows = []
         for t in top_expenses:
@@ -1429,12 +1435,12 @@ def main(page: ft.Page):
                         ft.Column(
                             [
                                 ft.Text(t["category"], weight=ft.FontWeight.W_600, size=13),
-                                ft.Text(f"{t['note'] or 'No note'} · {t['date']}", size=11, color=ft.Colors.GREY),
+                                ft.Text(f"{t['note'] or 'No note'} \u00b7 {t['date']}", size=11, color=ft.Colors.GREY),
                             ],
                             spacing=2,
                             expand=True,
                         ),
-                        ft.Text(f"₹{t['amount']:,.2f}", weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
+                        ft.Text(f"\u20b9{t['amount']:,.2f}", weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
                     ]
                 )
             )
@@ -1527,29 +1533,20 @@ def main(page: ft.Page):
         ],
     )
 
-    theme_icon_button = ft.IconButton(icon=ft.Icons.DARK_MODE_OUTLINED)
-
-    def toggle_theme(e):
-        if page.theme_mode == ft.ThemeMode.LIGHT:
-            page.theme_mode = ft.ThemeMode.DARK
-            theme_icon_button.icon = ft.Icons.LIGHT_MODE_OUTLINED
-        else:
-            page.theme_mode = ft.ThemeMode.LIGHT
-            theme_icon_button.icon = ft.Icons.DARK_MODE_OUTLINED
-        page.update()
-
-    theme_icon_button.on_click = toggle_theme
+    # Hidden until the app is unlocked (or immediately if no PIN exists yet)
+    settings_icon_button = ft.IconButton(icon=ft.Icons.SETTINGS_OUTLINED, visible=False)
 
     page.appbar = ft.AppBar(
         title=ft.Text("Finance Tracker"),
-        actions=[theme_icon_button],
+        actions=[settings_icon_button],
     )
     page.navigation_bar = nav_bar
 
-        # ---------------------------------------------------------------
+    # ---------------------------------------------------------------
     # FIRST-RUN SETUP
     # ---------------------------------------------------------------
-    onboarding_cash_field = ft.TextField(label="Cash in hand", prefix=ft.Text("₹"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    onboarding_cash_field = ft.TextField(label="Cash in hand", prefix=ft.Text("\u20b9"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    onboarding_banks_list = ft.Column(spacing=8)
     onboarding_error = ft.Text("", color=ft.Colors.RED)
 
     onboard_bank_name_field = ft.TextField(label="Bank name", border_color=ft.Colors.OUTLINE)
@@ -1557,7 +1554,7 @@ def main(page: ft.Page):
         label="Account type", options=[ft.dropdown.Option("Savings"), ft.dropdown.Option("Current")], border_color=ft.Colors.OUTLINE
     )
     onboard_bank_number_field = ft.TextField(label="Account number (optional)", border_color=ft.Colors.OUTLINE)
-    onboard_bank_balance_field = ft.TextField(label="Available balance", prefix=ft.Text("₹"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    onboard_bank_balance_field = ft.TextField(label="Available balance", prefix=ft.Text("\u20b9"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
     onboard_bank_error = ft.Text("", color=ft.Colors.RED)
 
     def close_onboard_bank_dialog(e=None):
@@ -1629,6 +1626,7 @@ def main(page: ft.Page):
 
         page.controls.clear()
         page.navigation_bar = nav_bar
+        settings_icon_button.visible = True
         refresh_account_dropdown()
         build_home()
         page.add(body)
@@ -1641,7 +1639,7 @@ def main(page: ft.Page):
             ft.Row(
                 [
                     ft.Text(name, weight=ft.FontWeight.W_600, expand=True),
-                    ft.Text(f"₹{balance:,.2f}", size=13, color=ft.Colors.GREY),
+                    ft.Text(f"\u20b9{balance:,.2f}", size=13, color=ft.Colors.GREY),
                 ]
             )
             for (_id, name, balance) in db.get_bank_accounts()
@@ -1684,14 +1682,231 @@ def main(page: ft.Page):
         )
         page.update()
 
-    if db.has_completed_setup():
-        refresh_account_dropdown()
-        build_home()
-        page.navigation_bar = nav_bar
-        page.add(body)
-    else:
+    def proceed_after_unlock():
+        settings_icon_button.visible = True
+        if db.has_completed_setup():
+            refresh_account_dropdown()
+            build_home()
+            page.navigation_bar = nav_bar
+            page.add(body)
+        else:
+            render_onboarding()
+            page.add(onboarding_view)
+        page.update()
+
+    # ---------------------------------------------------------------
+    # RESET PIN (verified by entering a bank account number)
+    # ---------------------------------------------------------------
+    reset_pin_number_field = ft.TextField(label="Enter any of your bank account numbers", border_color=ft.Colors.OUTLINE)
+    reset_pin_new_field = ft.TextField(label="New PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    reset_pin_confirm_field = ft.TextField(label="Confirm new PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    reset_pin_error = ft.Text("", color=ft.Colors.RED)
+    reset_pin_state = {"on_success": None}
+
+    def close_reset_pin_dialog(e=None):
+        page.pop_dialog()
+
+    def confirm_reset_pin(e):
+        reset_pin_error.value = ""
+        if not db.verify_account_number(reset_pin_number_field.value):
+            reset_pin_error.value = "That account number doesn't match any account on file"
+            page.update()
+            return
+        new_pin = reset_pin_new_field.value or ""
+        if len(new_pin) < 4:
+            reset_pin_error.value = "PIN must be at least 4 digits"
+            page.update()
+            return
+        if new_pin != (reset_pin_confirm_field.value or ""):
+            reset_pin_error.value = "PINs don't match"
+            page.update()
+            return
+
+        db.set_pin(new_pin)
+        page.pop_dialog()
+        if reset_pin_state["on_success"]:
+            reset_pin_state["on_success"]()
+        page.update()
+
+    reset_pin_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Reset PIN"),
+        content=ft.Column(
+            [reset_pin_number_field, reset_pin_new_field, reset_pin_confirm_field, reset_pin_error],
+            tight=True,
+            spacing=12,
+        ),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_reset_pin_dialog),
+            ft.TextButton("Reset", on_click=confirm_reset_pin),
+        ],
+    )
+
+    def open_reset_pin_dialog(on_success=None):
+        reset_pin_number_field.value = ""
+        reset_pin_new_field.value = ""
+        reset_pin_confirm_field.value = ""
+        reset_pin_error.value = ""
+        reset_pin_state["on_success"] = on_success
+        page.show_dialog(reset_pin_dialog)
+
+    # ---------------------------------------------------------------
+    # APP LOCK SCREEN
+    # ---------------------------------------------------------------
+    lock_pin_field = ft.TextField(label="Enter PIN", password=True, can_reveal_password=True, keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    lock_error = ft.Text("", color=ft.Colors.RED)
+    lock_view = ft.Container(padding=20, alignment=ft.Alignment.CENTER, expand=True)
+
+    def confirm_unlock(e):
+        lock_error.value = ""
+        if db.verify_pin(lock_pin_field.value or ""):
+            page.controls.clear()
+            proceed_after_unlock()
+        else:
+            lock_error.value = "Incorrect PIN"
+            page.update()
+
+    def unlocked_after_reset():
+        page.controls.clear()
+        proceed_after_unlock()
+
+    lock_view.content = ft.Column(
+        [
+            ft.Icon(ft.Icons.LOCK_OUTLINE, size=48, color=ft.Colors.GREY),
+            ft.Text("Enter your PIN to continue", size=16),
+            lock_pin_field,
+            lock_error,
+            ft.Button("Unlock", on_click=confirm_unlock, width=200),
+            ft.TextButton("Forgot PIN?", on_click=lambda e: open_reset_pin_dialog(on_success=unlocked_after_reset)),
+        ],
+        spacing=14,
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+    # ---------------------------------------------------------------
+    # SETTINGS SCREEN
+    # ---------------------------------------------------------------
+    dark_mode_switch = ft.Switch(value=False)
+
+    def on_dark_mode_switch(e):
+        page.theme_mode = ft.ThemeMode.DARK if dark_mode_switch.value else ft.ThemeMode.LIGHT
+        page.update()
+
+    dark_mode_switch.on_change = on_dark_mode_switch
+
+    reset_confirm_field = ft.TextField(label="Type DELETE to confirm", border_color=ft.Colors.OUTLINE)
+    reset_confirm_error = ft.Text("", color=ft.Colors.RED)
+
+    def close_reset_data_dialog(e=None):
+        page.pop_dialog()
+
+    def do_reset_all_data():
+        db.reset_all_data()
+        page.controls.clear()
+        page.navigation_bar = None
+        settings_icon_button.visible = False
         render_onboarding()
         page.add(onboarding_view)
+        page.update()
+
+    def confirm_reset_data(e):
+        reset_confirm_error.value = ""
+        if reset_confirm_field.value != "DELETE":
+            reset_confirm_error.value = "Type DELETE exactly to confirm"
+            page.update()
+            return
+        page.pop_dialog()
+        do_reset_all_data()
+
+    reset_data_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Reset All Data?"),
+        content=ft.Column(
+            [
+                ft.Text("This permanently deletes every account, transaction, loan, and investment. This cannot be undone."),
+                reset_confirm_field,
+                reset_confirm_error,
+            ],
+            tight=True,
+            spacing=12,
+        ),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_reset_data_dialog),
+            ft.TextButton("Reset Everything", on_click=confirm_reset_data),
+        ],
+    )
+
+    def open_reset_data_dialog():
+        reset_confirm_field.value = ""
+        reset_confirm_error.value = ""
+        if db.has_pin_set():
+            open_pin_dialog(on_success=lambda: page.show_dialog(reset_data_dialog))
+        else:
+            page.show_dialog(reset_data_dialog)
+
+    settings_view = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+
+    def build_settings():
+        dark_mode_switch.value = page.theme_mode == ft.ThemeMode.DARK
+        settings_view.controls = [
+            ft.Row([ft.IconButton(icon=ft.Icons.ARROW_BACK, on_click=lambda e: go_back_from_settings()), ft.Text("Settings", size=22, weight=ft.FontWeight.BOLD)]),
+            card(
+                ft.Row(
+                    [ft.Text("Dark Mode", expand=True), dark_mode_switch]
+                )
+            ),
+            card(
+                ft.Column(
+                    [
+                        ft.Text("Security", size=14, color=ft.Colors.GREY),
+                        ft.TextButton("Reset PIN", on_click=lambda e: open_reset_pin_dialog(on_success=lambda: None)),
+                    ],
+                    spacing=8,
+                )
+            ),
+            card(
+                ft.Column(
+                    [
+                        ft.Text("Danger Zone", size=14, color=ft.Colors.RED),
+                        ft.TextButton("Reset All App Data", on_click=lambda e: open_reset_data_dialog(), style=ft.ButtonStyle(color=ft.Colors.RED)),
+                    ],
+                    spacing=8,
+                )
+            ),
+            card(
+                ft.Column(
+                    [
+                        ft.Text("About", size=14, color=ft.Colors.GREY),
+                        ft.Text("Finance Tracker", weight=ft.FontWeight.BOLD),
+                        ft.Text("Version 1.0.0", size=12, color=ft.Colors.GREY),
+                        ft.Text("Built with Python + Flet", size=12, color=ft.Colors.GREY),
+                    ],
+                    spacing=4,
+                )
+            ),
+        ]
+        page.update()
+
+    def go_back_from_settings():
+        body.content = home_content
+        build_home()
+        nav_bar.selected_index = 0
+        page.update()
+
+    def open_settings(e=None):
+        build_settings()
+        body.content = settings_view
+        page.update()
+
+    settings_icon_button.on_click = open_settings
+
+    # ---------------------------------------------------------------
+    # STARTUP: lock screen first if a PIN exists, otherwise go straight in
+    # ---------------------------------------------------------------
+    if db.has_pin_set():
+        page.add(lock_view)
+    else:
+        proceed_after_unlock()
 
 
 ft.run(main)
