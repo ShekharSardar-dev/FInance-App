@@ -241,6 +241,7 @@ def _adjust_account_balance(conn, account_id, delta):
 def _hash_pin(pin):
     return hashlib.sha256(pin.encode()).hexdigest()
 
+
 def has_completed_setup():
     conn = get_connection()
     row = conn.execute("SELECT value FROM app_settings WHERE key = 'setup_complete'").fetchone()
@@ -254,6 +255,34 @@ def mark_setup_complete():
         "INSERT INTO app_settings (key, value) VALUES ('setup_complete', '1') "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
     )
+    conn.commit()
+    conn.close()
+
+
+def verify_account_number(account_number):
+    """Checks whether this exactly matches any account's stored number \u2014
+    used to confirm identity when resetting a forgotten PIN."""
+    if not account_number:
+        return False
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT 1 FROM accounts WHERE account_number = ? LIMIT 1", (account_number,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def reset_all_data():
+    """Wipes every table back to empty, including the PIN and the
+    setup-complete flag \u2014 so the app behaves like a fresh install again
+    the next time it starts. The table structures themselves are untouched."""
+    conn = get_connection()
+    tables = [
+        "transactions", "loans", "loan_repayments", "investments",
+        "investment_transactions", "budgets", "accounts", "app_settings",
+    ]
+    for table in tables:
+        conn.execute(f"DELETE FROM {table}")
     conn.commit()
     conn.close()
 
@@ -418,6 +447,26 @@ def get_category_spending(year_month=None):
     return rows
 
 
+def shift_month(year_month, delta):
+    """Shifts a 'YYYY-MM' string by `delta` months (negative = backward)."""
+    year, month = (int(p) for p in year_month.split("-"))
+    month += delta
+    while month <= 0:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    return f"{year:04d}-{month:02d}"
+
+
+def get_available_months(back=12):
+    """Returns the last `back` 'YYYY-MM' strings up to and including the
+    current month, newest first \u2014 used to populate the month picker."""
+    current = date.today().isoformat()[:7]
+    return [shift_month(current, -i) for i in range(back)]
+
+
 def get_cash_flow_trend(months=6):
     """Returns [(year_month, income, expense), ...] for the last `months`
     months in chronological order (oldest first), for the Stats trend chart."""
@@ -447,6 +496,88 @@ def get_cash_flow_trend(months=6):
     return results
 
 
+def get_income_by_category(year_month=None):
+    """Same idea as get_category_spending, but for income \u2014 powers the
+    income breakdown pie chart."""
+    year_month = year_month or date.today().isoformat()[:7]
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT category, SUM(amount) FROM transactions
+           WHERE type = 'income' AND date LIKE ?
+           GROUP BY category ORDER BY SUM(amount) DESC""",
+        (f"{year_month}%",),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_month_comparison(year_month=None):
+    """Returns [(category, this_month, last_month, pct_change), ...] for
+    expense categories, comparing the given month to the one before it.
+    pct_change is None when there's nothing to compare against (division by zero)."""
+    year_month = year_month or date.today().isoformat()[:7]
+    prev_month = shift_month(year_month, -1)
+
+    this_month_rows = dict(get_category_spending(year_month))
+    prev_month_rows = dict(get_category_spending(prev_month))
+
+    categories = set(this_month_rows) | set(prev_month_rows)
+    results = []
+    for cat in categories:
+        current = this_month_rows.get(cat, 0)
+        previous = prev_month_rows.get(cat, 0)
+        pct_change = ((current - previous) / previous * 100) if previous else None
+        results.append((cat, current, previous, pct_change))
+
+    results.sort(key=lambda r: r[1], reverse=True)
+    return results
+
+
+def get_category_trend(category, txn_type="expense", months=6):
+    """Returns [(year_month, amount), ...] for one specific category across
+    the last `months` months (oldest first) \u2014 powers the category trend line chart."""
+    conn = get_connection()
+    current = date.today().isoformat()[:7]
+    results = []
+    for i in range(months - 1, -1, -1):
+        ym = shift_month(current, -i)
+        amount = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = ? AND category = ? AND date LIKE ?",
+            (txn_type, category, f"{ym}%"),
+        ).fetchone()[0]
+        results.append((ym, amount))
+    conn.close()
+    return results
+
+
+def get_projected_month_end_spend(year_month=None):
+    """Projects the full month's expense total based on the daily average
+    spend so far. Only really meaningful for the CURRENT, in-progress month
+    \u2014 returns None for any other month since there's nothing to project."""
+    current = date.today().isoformat()[:7]
+    year_month = year_month or current
+    if year_month != current:
+        return None
+
+    today = date.today()
+    days_elapsed = today.day
+
+    import calendar
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+
+    conn = get_connection()
+    spent_so_far = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense' AND date LIKE ?",
+        (f"{year_month}%",),
+    ).fetchone()[0]
+    conn.close()
+
+    if days_elapsed == 0:
+        return None
+    daily_average = spent_so_far / days_elapsed
+    return daily_average * days_in_month, spent_so_far, days_elapsed, days_in_month
+
+
 def set_budget(category, monthly_limit):
     """Creates or updates the budget for a category (one budget per category)."""
     conn = get_connection()
@@ -459,10 +590,11 @@ def set_budget(category, monthly_limit):
     conn.close()
 
 
-def get_budgets():
-    """Returns each budget along with how much has actually been spent on
-    that category this month, so the UI can draw a progress bar directly."""
-    year_month = date.today().isoformat()[:7]
+def get_budgets(year_month=None):
+    """Returns each budget along with how much was actually spent on that
+    category in the given month (defaults to the current month), so the UI
+    can draw a progress bar directly."""
+    year_month = year_month or date.today().isoformat()[:7]
     conn = get_connection()
     budget_rows = conn.execute("SELECT id, category, monthly_limit FROM budgets ORDER BY category").fetchall()
 
@@ -483,6 +615,7 @@ def delete_budget(budget_id):
     conn.execute("DELETE FROM budgets WHERE id = ?", (budget_id,))
     conn.commit()
     conn.close()
+
 
 def shift_month(months_ago, from_year_month=None):
     """Returns the 'YYYY-MM' string for `months_ago` months before
@@ -522,7 +655,7 @@ def get_net_worth():
 
 def get_top_expenses(year_month=None, limit=5):
     """Returns the biggest individual expenses in a month, not grouped by
-    category — useful for spotting one-off big spends."""
+    category \u2014 useful for spotting one-off big spends."""
     year_month = year_month or date.today().isoformat()[:7]
     conn = get_connection()
     rows = conn.execute(
@@ -540,7 +673,7 @@ def get_top_expenses(year_month=None, limit=5):
 
 
 def get_transactions_by_category(category, year_month=None):
-    """Every transaction in a given category for a given month — powers
+    """Every transaction in a given category for a given month \u2014 powers
     tapping a category in the Stats breakdown to see what's behind it."""
     year_month = year_month or date.today().isoformat()[:7]
     conn = get_connection()
@@ -555,6 +688,8 @@ def get_transactions_by_category(category, year_month=None):
     conn.close()
     columns = ["amount", "note", "date", "account_name"]
     return [dict(zip(columns, row)) for row in rows]
+
+
 
 if __name__ == "__main__":
     init_db()
