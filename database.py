@@ -66,19 +66,24 @@ def init_db():
         )
     """)
 
-    # Recurring items like SIPs and subscriptions, used to remind you and
-    # auto-tag matching transactions.
+    # Recurring income/expenses (salary, rent, subscriptions, SIPs) \u2014
+    # used as quick-add shortcuts on the Add Transaction screen.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS recurring_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'expense',
             amount REAL NOT NULL,
             category TEXT NOT NULL,
-            due_day INTEGER NOT NULL,
+            due_day INTEGER NOT NULL DEFAULT 1,
             account_id INTEGER NOT NULL,
             FOREIGN KEY (account_id) REFERENCES accounts(id)
         )
     """)
+
+    existing_recurring_cols = [row[1] for row in cur.execute("PRAGMA table_info(recurring_items)").fetchall()]
+    if "type" not in existing_recurring_cols:
+        cur.execute("ALTER TABLE recurring_items ADD COLUMN type TEXT NOT NULL DEFAULT 'expense'")
 
     # Money lent to or borrowed from someone.
     cur.execute("""
@@ -962,3 +967,39 @@ def get_investment_totals():
     conn.close()
     total_invested, total_current = row
     return total_invested, total_current, total_current - total_invested
+
+
+# ---------------------------------------------------------------------
+# RECURRING ITEMS (quick-add shortcuts for regular income/expenses)
+# ---------------------------------------------------------------------
+
+def add_recurring_item(name, amount, type_, category, account_id, due_day=1):
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO recurring_items (name, type, amount, category, due_day, account_id) VALUES (?, ?, ?, ?, ?, ?)",
+        (name, type_, amount, category, due_day, account_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recurring_items(type_=None):
+    conn = get_connection()
+    query = """SELECT r.id, r.name, r.type, r.amount, r.category, r.due_day, r.account_id, a.name
+               FROM recurring_items r JOIN accounts a ON r.account_id = a.id"""
+    params = ()
+    if type_:
+        query += " WHERE r.type = ?"
+        params = (type_,)
+    query += " ORDER BY r.name"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    columns = ["id", "name", "type", "amount", "category", "due_day", "account_id", "account_name"]
+    return [dict(zip(columns, row)) for row in rows]
+
+
+def delete_recurring_item(item_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM recurring_items WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
