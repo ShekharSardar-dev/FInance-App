@@ -493,6 +493,7 @@ def main(page: ft.Page):
             ft.dropdown.Option(key=str(a_id), text=name) for (a_id, name, _bal) in db.get_accounts()
         ]
         set_default_account(account_dropdown)
+        refresh_recurring_chips()
 
     def submit_transaction(e):
         add_feedback.value = ""
@@ -548,17 +549,58 @@ def main(page: ft.Page):
         build_home()  # refresh Home so it reflects the new transaction
         page.update()
 
+    recurring_chips_row = ft.Row(wrap=True, spacing=8)
+
+    def apply_recurring_item(item):
+        is_income = item["type"] == "income"
+        type_toggle.selected_index = 0 if is_income else 1
+        cat_list = INCOME_CATEGORIES if is_income else EXPENSE_CATEGORIES
+        category_dropdown.options = [ft.dropdown.Option(c) for c in cat_list]
+        category_dropdown.value = item["category"] if item["category"] in cat_list else None
+        counterparty_field.label = "Received From (optional)" if is_income else "Paid To (optional)"
+        account_dropdown.label = "Received In" if is_income else "Paid Via"
+        amount_field.value = str(item["amount"])
+        account_dropdown.value = str(item["account_id"])
+        page.update()
+
+    def refresh_recurring_chips():
+        items = db.get_recurring_items()
+        chips = [
+            ft.Container(
+                content=ft.Text(f"{item['name']} ₹{item['amount']:,.0f}", size=12, color=ft.Colors.WHITE),
+                bgcolor=ft.Colors.GREEN if item["type"] == "income" else ft.Colors.BLUE,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                border_radius=16,
+                on_click=lambda e, it=item: apply_recurring_item(it),
+                ink=True,
+            )
+            for item in items
+        ] or [ft.Text("No recurring items yet — add some in Settings", size=12, color=ft.Colors.GREY)]
+
+        recurring_chips_row.controls.clear()
+        recurring_chips_row.controls.extend(chips)
+        
     add_content = ft.Column(
         [
             ft.Text("Add Transaction", size=22, weight=ft.FontWeight.BOLD),
-            type_toggle,
-            amount_field,
-            account_dropdown,
-            category_dropdown,
-            counterparty_field,
-            note_field,
-            ft.Button("Add", on_click=submit_transaction, width=200),
-            add_feedback,
+            card(
+                ft.Column(
+                    [
+                        ft.Text("Quick Add", size=12, color=ft.Colors.GREY),
+                        recurring_chips_row,
+                        ft.Divider(height=1),
+                        type_toggle,
+                        amount_field,
+                        account_dropdown,
+                        category_dropdown,
+                        counterparty_field,
+                        note_field,
+                        ft.Button("Add", on_click=submit_transaction, width=200),
+                        add_feedback,
+                    ],
+                    spacing=16,
+                )
+            ),
         ],
         spacing=16,
         scroll=ft.ScrollMode.AUTO,
@@ -1634,6 +1676,124 @@ def main(page: ft.Page):
 
     onboarding_view = ft.Container(padding=20, expand=True)
 
+    # --- Shared "Add Recurring Item" dialog (used by onboarding and Settings) ---
+    recurring_name_field = ft.TextField(label="Name (e.g. Rent, Salary, Netflix)", border_color=ft.Colors.OUTLINE)
+    recurring_type_toggle = ft.CupertinoSlidingSegmentedButton(
+        selected_index=1, controls=[ft.Text("Income"), ft.Text("Expense")]
+    )
+    recurring_amount_field = ft.TextField(label="Amount", prefix=ft.Text("\u20b9"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    recurring_category_dropdown = ft.Dropdown(
+        label="Category", options=[ft.dropdown.Option(c) for c in EXPENSE_CATEGORIES], border_color=ft.Colors.OUTLINE
+    )
+    recurring_account_dropdown = ft.Dropdown(label="Account", border_color=ft.Colors.OUTLINE)
+    recurring_error = ft.Text("", color=ft.Colors.RED)
+    recurring_dialog_state = {"on_success": None}
+
+    def on_recurring_type_change(e):
+        is_income = recurring_type_toggle.selected_index == 0
+        recurring_category_dropdown.options = [
+            ft.dropdown.Option(c) for c in (INCOME_CATEGORIES if is_income else EXPENSE_CATEGORIES)
+        ]
+        recurring_category_dropdown.value = None
+        page.update()
+
+    recurring_type_toggle.on_change = on_recurring_type_change
+
+    def close_add_recurring_dialog(e=None):
+        page.pop_dialog()
+
+    def confirm_add_recurring(e):
+        recurring_error.value = ""
+        if not recurring_name_field.value:
+            recurring_error.value = "Enter a name"
+            page.update()
+            return
+        try:
+            amount = float(recurring_amount_field.value)
+            if amount <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            recurring_error.value = "Enter a valid amount"
+            page.update()
+            return
+        if not recurring_category_dropdown.value:
+            recurring_error.value = "Pick a category"
+            page.update()
+            return
+        if not recurring_account_dropdown.value:
+            recurring_error.value = "Pick an account"
+            page.update()
+            return
+
+        type_ = "income" if recurring_type_toggle.selected_index == 0 else "expense"
+        db.add_recurring_item(
+            name=recurring_name_field.value,
+            amount=amount,
+            type_=type_,
+            category=recurring_category_dropdown.value,
+            account_id=int(recurring_account_dropdown.value),
+        )
+
+        recurring_name_field.value = ""
+        recurring_amount_field.value = ""
+        recurring_category_dropdown.value = None
+        recurring_account_dropdown.value = None
+        page.pop_dialog()
+        refresh_recurring_chips()
+        if recurring_dialog_state["on_success"]:
+            recurring_dialog_state["on_success"]()
+        page.update()
+
+    add_recurring_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Add Recurring Item"),
+        content=ft.Column(
+            [recurring_name_field, recurring_type_toggle, recurring_amount_field, recurring_category_dropdown, recurring_account_dropdown, recurring_error],
+            tight=True,
+            spacing=12,
+        ),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_add_recurring_dialog),
+            ft.TextButton("Add", on_click=confirm_add_recurring),
+        ],
+    )
+
+    def open_add_recurring_dialog(on_success=None):
+        recurring_error.value = ""
+        recurring_account_dropdown.options = [
+            ft.dropdown.Option(key=str(a_id), text=name) for (a_id, name, _bal) in db.get_accounts()
+        ]
+        set_default_account(recurring_account_dropdown)
+        recurring_dialog_state["on_success"] = on_success
+        page.show_dialog(add_recurring_dialog)
+
+    def delete_recurring_item_clicked(item_id, on_success=None):
+        db.delete_recurring_item(item_id)
+        refresh_recurring_chips()
+        if on_success:
+            on_success()
+
+    def recurring_items_rows(on_change):
+        items = db.get_recurring_items()
+        if not items:
+            return [ft.Text("No recurring items added yet (optional)", size=12, color=ft.Colors.GREY)]
+        rows = []
+        for item in items:
+            color = ft.Colors.GREEN if item["type"] == "income" else ft.Colors.RED
+            rows.append(
+                ft.Row(
+                    [
+                        ft.Text(item["name"], weight=ft.FontWeight.W_600, expand=True),
+                        ft.Text(f"\u20b9{item['amount']:,.2f}", size=13, color=color),
+                        ft.IconButton(
+                            icon=ft.Icons.CLOSE, icon_size=16,
+                            on_click=lambda e, iid=item["id"]: delete_recurring_item_clicked(iid, on_change),
+                        ),
+                    ]
+                )
+            )
+        return rows
+
     def render_onboarding():
         bank_rows = [
             ft.Row(
@@ -1671,6 +1831,21 @@ def main(page: ft.Page):
                             ft.Divider(height=1),
                         ]
                         + (bank_rows or [ft.Text("No bank accounts added yet (optional)", size=12, color=ft.Colors.GREY)]),
+                        spacing=8,
+                    )
+                ),
+                card(
+                    ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text("Recurring Income & Expenses", size=14, color=ft.Colors.GREY, expand=True),
+                                    ft.TextButton("+ Add Recurring", on_click=lambda e: open_add_recurring_dialog(on_success=render_onboarding)),
+                                ]
+                            ),
+                            ft.Divider(height=1),
+                        ]
+                        + recurring_items_rows(render_onboarding),
                         spacing=8,
                     )
                 ),
@@ -1846,6 +2021,17 @@ def main(page: ft.Page):
 
     settings_view = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
 
+    def lock_now(e=None):
+        if not db.has_pin_set():
+            return  # nothing to lock with yet
+        page.controls.clear()
+        page.navigation_bar = None
+        settings_icon_button.visible = False
+        lock_pin_field.value = ""
+        lock_error.value = ""
+        page.add(lock_view)
+        page.update()
+
     def build_settings():
         dark_mode_switch.value = page.theme_mode == ft.ThemeMode.DARK
         settings_view.controls = [
@@ -1860,7 +2046,23 @@ def main(page: ft.Page):
                     [
                         ft.Text("Security", size=14, color=ft.Colors.GREY),
                         ft.TextButton("Reset PIN", on_click=lambda e: open_reset_pin_dialog(on_success=lambda: None)),
+                        ft.TextButton("Lock Now", on_click=lambda e: lock_now()),
                     ],
+                    spacing=8,
+                )
+            ),
+            card(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text("Recurring Income & Expenses", size=14, color=ft.Colors.GREY, expand=True),
+                                ft.TextButton("+ Add Recurring", on_click=lambda e: open_add_recurring_dialog(on_success=build_settings)),
+                            ]
+                        ),
+                        ft.Divider(height=1),
+                    ]
+                    + recurring_items_rows(build_settings),
                     spacing=8,
                 )
             ),
