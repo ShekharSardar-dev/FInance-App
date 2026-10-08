@@ -462,8 +462,14 @@ def main(page: ft.Page):
     amount_field = ft.TextField(label="Amount", prefix=ft.Text("\u20b9"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
     account_dropdown = ft.Dropdown(label="Paid via", border_color=ft.Colors.OUTLINE)
 
-    EXPENSE_CATEGORIES = ["Food", "Travel", "Rent", "Utilities", "Miscellaneous", "Other Expense"]
-    INCOME_CATEGORIES = ["Salary", "Business", "Gift", "Interest", "Other Income"]
+    EXPENSE_CATEGORIES = db.get_category_names("expense")
+    INCOME_CATEGORIES = db.get_category_names("income")
+
+    def reload_categories():
+        """Re-reads the lists from the database IN PLACE, so every dropdown
+        and function that already points at these lists sees the change."""
+        EXPENSE_CATEGORIES[:] = db.get_category_names("expense")
+        INCOME_CATEGORIES[:] = db.get_category_names("income")
 
     category_dropdown = ft.Dropdown(
         label="Category",
@@ -488,11 +494,25 @@ def main(page: ft.Page):
 
     type_toggle.on_change = on_type_change
 
+    def _set_dropdown_options(dropdown, names):
+        dropdown.options = [ft.dropdown.Option(c) for c in names]
+        if dropdown.value not in names:
+            dropdown.value = None  # the selected category was deleted
+
+    def refresh_category_dropdowns():
+        reload_categories()
+        add_is_income = type_toggle.selected_index == 0
+        _set_dropdown_options(category_dropdown, INCOME_CATEGORIES if add_is_income else EXPENSE_CATEGORIES)
+        rec_is_income = recurring_type_toggle.selected_index == 0
+        _set_dropdown_options(recurring_category_dropdown, INCOME_CATEGORIES if rec_is_income else EXPENSE_CATEGORIES)
+        _set_dropdown_options(budget_category_dropdown, EXPENSE_CATEGORIES)
+
     def refresh_account_dropdown():
         account_dropdown.options = [
             ft.dropdown.Option(key=str(a_id), text=name) for (a_id, name, _bal) in db.get_accounts()
         ]
         set_default_account(account_dropdown)
+        refresh_category_dropdowns()
         refresh_recurring_chips()
 
     def submit_transaction(e):
@@ -567,7 +587,7 @@ def main(page: ft.Page):
         items = db.get_recurring_items()
         chips = [
             ft.Container(
-                content=ft.Text(f"{item['name']} ₹{item['amount']:,.0f}", size=12, color=ft.Colors.WHITE),
+                content=ft.Text(f"{item['name']} \u20b9{item['amount']:,.0f}", size=12, color=ft.Colors.WHITE),
                 bgcolor=ft.Colors.GREEN if item["type"] == "income" else ft.Colors.BLUE,
                 padding=ft.Padding.symmetric(horizontal=12, vertical=6),
                 border_radius=16,
@@ -575,11 +595,11 @@ def main(page: ft.Page):
                 ink=True,
             )
             for item in items
-        ] or [ft.Text("No recurring items yet — add some in Settings", size=12, color=ft.Colors.GREY)]
+        ] or [ft.Text("No recurring items yet \u2014 add some in Settings", size=12, color=ft.Colors.GREY)]
 
         recurring_chips_row.controls.clear()
         recurring_chips_row.controls.extend(chips)
-        
+
     add_content = ft.Column(
         [
             ft.Text("Add Transaction", size=22, weight=ft.FontWeight.BOLD),
@@ -1739,7 +1759,6 @@ def main(page: ft.Page):
         recurring_category_dropdown.value = None
         recurring_account_dropdown.value = None
         page.pop_dialog()
-        refresh_recurring_chips()
         if recurring_dialog_state["on_success"]:
             recurring_dialog_state["on_success"]()
         page.update()
@@ -1759,6 +1778,7 @@ def main(page: ft.Page):
     )
 
     def open_add_recurring_dialog(on_success=None):
+        refresh_category_dropdowns()
         recurring_error.value = ""
         recurring_account_dropdown.options = [
             ft.dropdown.Option(key=str(a_id), text=name) for (a_id, name, _bal) in db.get_accounts()
@@ -1769,7 +1789,6 @@ def main(page: ft.Page):
 
     def delete_recurring_item_clicked(item_id, on_success=None):
         db.delete_recurring_item(item_id)
-        refresh_recurring_chips()
         if on_success:
             on_success()
 
@@ -1977,6 +1996,7 @@ def main(page: ft.Page):
 
     def do_reset_all_data():
         db.reset_all_data()
+        refresh_category_dropdowns()  # categories are back to the defaults
         page.controls.clear()
         page.navigation_bar = None
         settings_icon_button.visible = False
@@ -2021,6 +2041,72 @@ def main(page: ft.Page):
 
     settings_view = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
 
+    # --- Manage Categories (Settings) ---
+    new_category_name_field = ft.TextField(label="Category name", border_color=ft.Colors.OUTLINE)
+    new_category_type_toggle = ft.CupertinoSlidingSegmentedButton(
+        selected_index=1, controls=[ft.Text("Income"), ft.Text("Expense")]
+    )
+    new_category_error = ft.Text("", color=ft.Colors.RED)
+    category_message = {"text": ""}  # shown once in Settings, e.g. "Keep at least one..."
+
+    def close_add_category_dialog(e=None):
+        page.pop_dialog()
+
+    def confirm_add_category(e):
+        new_category_error.value = ""
+        type_ = "income" if new_category_type_toggle.selected_index == 0 else "expense"
+        try:
+            db.add_category(new_category_name_field.value, type_)
+        except ValueError as err:
+            new_category_error.value = str(err)
+            page.update()
+            return
+        new_category_name_field.value = ""
+        page.pop_dialog()
+        build_settings()
+
+    add_category_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Add Category"),
+        content=ft.Column(
+            [new_category_name_field, new_category_type_toggle, new_category_error],
+            tight=True,
+            spacing=12,
+        ),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_add_category_dialog),
+            ft.TextButton("Add", on_click=confirm_add_category),
+        ],
+    )
+
+    def open_add_category_dialog(e=None):
+        new_category_error.value = ""
+        new_category_name_field.value = ""
+        page.show_dialog(add_category_dialog)
+
+    def delete_category_clicked(category_id):
+        try:
+            db.delete_category(category_id)
+        except ValueError as err:
+            category_message["text"] = str(err)
+        build_settings()
+
+    def category_rows(type_):
+        rows = []
+        for cat in db.get_categories_full(type_):
+            rows.append(
+                ft.Row(
+                    [
+                        ft.Text(cat["name"], size=13, expand=True),
+                        ft.IconButton(
+                            icon=ft.Icons.CLOSE, icon_size=16,
+                            on_click=lambda e, cid=cat["id"]: delete_category_clicked(cid),
+                        ),
+                    ]
+                )
+            )
+        return rows
+
     def lock_now(e=None):
         if not db.has_pin_set():
             return  # nothing to lock with yet
@@ -2034,6 +2120,8 @@ def main(page: ft.Page):
 
     def build_settings():
         dark_mode_switch.value = page.theme_mode == ft.ThemeMode.DARK
+        category_message_text = category_message["text"]
+        category_message["text"] = ""  # show it once, then clear
         settings_view.controls = [
             ft.Row([ft.IconButton(icon=ft.Icons.ARROW_BACK, on_click=lambda e: go_back_from_settings()), ft.Text("Settings", size=22, weight=ft.FontWeight.BOLD)]),
             card(
@@ -2064,6 +2152,25 @@ def main(page: ft.Page):
                     ]
                     + recurring_items_rows(build_settings),
                     spacing=8,
+                )
+            ),
+            card(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text("Categories", size=14, color=ft.Colors.GREY, expand=True),
+                                ft.TextButton("+ Add Category", on_click=open_add_category_dialog),
+                            ]
+                        ),
+                        ft.Divider(height=1),
+                        ft.Text("Expense", size=12, color=ft.Colors.RED),
+                    ]
+                    + category_rows("expense")
+                    + [ft.Text("Income", size=12, color=ft.Colors.GREEN)]
+                    + category_rows("income")
+                    + ([ft.Text(category_message_text, size=12, color=ft.Colors.RED)] if category_message_text else []),
+                    spacing=4,
                 )
             ),
             card(

@@ -156,7 +156,90 @@ def init_db():
         )
     """)
 
+    # Categories you can pick from when adding transactions. Seeded with
+    # the defaults the first time, then fully editable from Settings.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
+            UNIQUE(name, type)
+        )
+    """)
+    _seed_default_categories(cur)
+
     conn.commit()
+    conn.close()
+
+
+DEFAULT_EXPENSE_CATEGORIES = ["Food", "Travel", "Rent", "Utilities", "Miscellaneous", "Other Expense"]
+DEFAULT_INCOME_CATEGORIES = ["Salary", "Business", "Gift", "Interest", "Other Income"]
+
+
+def _seed_default_categories(cur):
+    """Fills the categories table with the defaults, but only if it's empty,
+    so categories you've added or removed are never overwritten."""
+    already = cur.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+    if already:
+        return
+    for name in DEFAULT_EXPENSE_CATEGORIES:
+        cur.execute("INSERT INTO categories (name, type) VALUES (?, 'expense')", (name,))
+    for name in DEFAULT_INCOME_CATEGORIES:
+        cur.execute("INSERT INTO categories (name, type) VALUES (?, 'income')", (name,))
+
+
+# ---------------------------------------------------------------------
+# CATEGORIES
+# ---------------------------------------------------------------------
+
+def get_category_names(type_):
+    """Names only, in the order they were created \u2014 for dropdowns."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT name FROM categories WHERE type = ? ORDER BY id", (type_,)
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def get_categories_full(type_):
+    """id + name, for the Settings list where each one has a delete button."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, name FROM categories WHERE type = ? ORDER BY id", (type_,)
+    ).fetchall()
+    conn.close()
+    return [{"id": r[0], "name": r[1]} for r in rows]
+
+
+def add_category(name, type_):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("Enter a category name")
+    conn = get_connection()
+    try:
+        conn.execute("INSERT INTO categories (name, type) VALUES (?, ?)", (name, type_))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise ValueError(f"'{name}' already exists")
+    finally:
+        conn.close()
+
+
+def delete_category(category_id):
+    """Removes it from the pick-lists only. Past transactions keep their
+    category text, so history and charts are unaffected."""
+    conn = get_connection()
+    row = conn.execute("SELECT type FROM categories WHERE id = ?", (category_id,)).fetchone()
+    if row:
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM categories WHERE type = ?", (row[0],)
+        ).fetchone()[0]
+        if remaining <= 1:
+            conn.close()
+            raise ValueError(f"Keep at least one {row[0]} category")
+        conn.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+        conn.commit()
     conn.close()
 
 
@@ -282,12 +365,17 @@ def reset_all_data():
     setup-complete flag \u2014 so the app behaves like a fresh install again
     the next time it starts. The table structures themselves are untouched."""
     conn = get_connection()
+    # Order matters: tables that point at other tables (via foreign keys)
+    # must be emptied BEFORE the tables they point at.
     tables = [
-        "transactions", "loans", "loan_repayments", "investments",
-        "investment_transactions", "budgets", "accounts", "app_settings",
+        "loan_repayments", "investment_transactions", "transactions",
+        "recurring_items", "budgets", "loans", "investments",
+        "accounts", "categories", "app_settings",
     ]
     for table in tables:
         conn.execute(f"DELETE FROM {table}")
+    # Put the default categories back, so a fresh start has something to pick from.
+    _seed_default_categories(conn.cursor())
     conn.commit()
     conn.close()
 
