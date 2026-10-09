@@ -501,6 +501,90 @@ def get_transactions(limit=None):
     return rows
 
 
+def get_transactions_for_month(year_month):
+    """Same shape as get_transactions(), but only one 'YYYY-MM' month \u2014
+    used by the View All screen so it never has to load years of history."""
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT t.id, t.type, t.amount, t.category, t.sub_category, t.note, t.date, a.name
+           FROM transactions t
+           JOIN accounts a ON t.account_id = a.id
+           WHERE t.date LIKE ?
+           ORDER BY t.date DESC, t.id DESC""",
+        (f"{year_month}%",),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_transaction(transaction_id):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id, account_id, type, amount, category, note, date FROM transactions WHERE id = ?",
+        (transaction_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    columns = ["id", "account_id", "type", "amount", "category", "note", "date"]
+    return dict(zip(columns, row))
+
+
+def update_transaction(transaction_id, account_id, type_, amount, category, note, txn_date):
+    """Edits a transaction AND keeps account balances right: the old
+    transaction's effect is undone on its old account, then the new one is
+    applied to the (possibly different) new account. All-or-nothing."""
+    if type_ not in ("income", "expense"):
+        raise ValueError("Type must be income or expense")
+    if amount <= 0:
+        raise ValueError("Amount must be more than zero")
+    try:
+        txn_date = date.fromisoformat((txn_date or "").strip()).isoformat()
+    except ValueError:
+        raise ValueError("Enter the date as YYYY-MM-DD")
+
+    conn = get_connection()
+    try:
+        old = conn.execute(
+            "SELECT account_id, type, amount FROM transactions WHERE id = ?", (transaction_id,)
+        ).fetchone()
+        if not old:
+            raise ValueError("Transaction not found")
+        old_account, old_type, old_amount = old
+
+        # Undo the old effect, then apply the new one.
+        _adjust_account_balance(conn, old_account, -old_amount if old_type == "income" else old_amount)
+        _adjust_account_balance(conn, account_id, amount if type_ == "income" else -amount)
+
+        conn.execute(
+            """UPDATE transactions
+               SET account_id = ?, type = ?, amount = ?, category = ?, note = ?, date = ?
+               WHERE id = ?""",
+            (account_id, type_, amount, category, note, txn_date, transaction_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_transaction(transaction_id):
+    """Removes a transaction and puts its money back: deleting an expense
+    returns it to the account, deleting income takes it back out."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT account_id, type, amount FROM transactions WHERE id = ?", (transaction_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError("Transaction not found")
+        account_id, type_, amount = row
+        _adjust_account_balance(conn, account_id, -amount if type_ == "income" else amount)
+        conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_monthly_cash_flow(year_month=None):
     """Returns (total_income, total_expense, net) for a given 'YYYY-MM'.
     Defaults to the current month."""
@@ -724,6 +808,9 @@ def shift_month(months_ago, from_year_month=None):
     while month <= 0:
         month += 12
         year -= 1
+    while month > 12:  # a negative months_ago moves forward in time
+        month -= 12
+        year += 1
     return f"{year:04d}-{month:02d}"
 
 
