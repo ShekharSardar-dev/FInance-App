@@ -514,6 +514,7 @@ def main(page: ft.Page):
         set_default_account(account_dropdown)
         refresh_category_dropdowns()
         refresh_recurring_chips()
+        refresh_add_transactions()
 
     def submit_transaction(e):
         add_feedback.value = ""
@@ -567,6 +568,303 @@ def main(page: ft.Page):
         add_feedback.color = ft.Colors.GREEN
 
         build_home()  # refresh Home so it reflects the new transaction
+        refresh_add_transactions()  # and the list shown on this tab
+        page.update()
+
+    # --- Recent transactions on the Add tab, with edit / delete ---
+    recent_txn_column = ft.Column(spacing=10)
+
+    def transaction_row(t):
+        (tid, ttype, amount, category, sub_category, note, txn_date, account_name) = t
+        color = ft.Colors.GREEN if ttype == "income" else ft.Colors.RED
+        sign = "+" if ttype == "income" else "-"
+        return ft.Row(
+            [
+                ft.Column(
+                    [
+                        ft.Text(category, weight=ft.FontWeight.W_600),
+                        ft.Text(f"{account_name} \u00b7 {note or ''}", size=12, color=ft.Colors.GREY),
+                    ],
+                    spacing=2,
+                    expand=True,
+                ),
+                ft.Column(
+                    [
+                        ft.Text(f"{sign}\u20b9{amount:,.2f}", color=color, weight=ft.FontWeight.BOLD),
+                        ft.Text(txn_date, size=11, color=ft.Colors.GREY),
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.END,
+                    spacing=2,
+                ),
+                ft.PopupMenuButton(
+                    icon=ft.Icons.MORE_VERT,
+                    items=[
+                        ft.PopupMenuItem(content=ft.Text("Edit"), on_click=lambda e, i=tid: open_edit_transaction_dialog(i)),
+                        ft.PopupMenuItem(content=ft.Text("Delete"), on_click=lambda e, i=tid: open_delete_transaction_dialog(i)),
+                    ],
+                ),
+            ]
+        )
+
+    def refresh_add_transactions():
+        rows = []
+        for t in db.get_transactions(limit=10):
+            rows.append(transaction_row(t))
+            rows.append(ft.Divider(height=1))
+        if not rows:
+            rows = [ft.Text("No transactions yet", size=12, color=ft.Colors.GREY)]
+        recent_txn_column.controls.clear()
+        recent_txn_column.controls.extend(rows)
+
+    # One place that refreshes everything showing transactions or balances.
+    def after_transaction_change():
+        build_home()
+        refresh_add_transactions()
+        if history_state["open"]:
+            build_history()
+        page.update()
+
+    # --- Edit transaction dialog ---
+    edit_txn_state = {"id": None}
+    edit_txn_type_toggle = ft.CupertinoSlidingSegmentedButton(
+        selected_index=1, controls=[ft.Text("Income"), ft.Text("Expense")]
+    )
+    edit_txn_amount_field = ft.TextField(label="Amount", prefix=ft.Text("\u20b9"), keyboard_type=ft.KeyboardType.NUMBER, border_color=ft.Colors.OUTLINE)
+    edit_txn_account_dropdown = ft.Dropdown(label="Account", border_color=ft.Colors.OUTLINE)
+    edit_txn_category_dropdown = ft.Dropdown(label="Category", border_color=ft.Colors.OUTLINE)
+    edit_txn_note_field = ft.TextField(label="Note", border_color=ft.Colors.OUTLINE)
+    edit_txn_date_field = ft.TextField(label="Date (YYYY-MM-DD)", border_color=ft.Colors.OUTLINE)
+    edit_txn_error = ft.Text("", color=ft.Colors.RED)
+
+    def on_edit_txn_type_change(e):
+        names = INCOME_CATEGORIES if edit_txn_type_toggle.selected_index == 0 else EXPENSE_CATEGORIES
+        edit_txn_category_dropdown.options = [ft.dropdown.Option(c) for c in names]
+        edit_txn_category_dropdown.value = None
+        page.update()
+
+    edit_txn_type_toggle.on_change = on_edit_txn_type_change
+
+    def close_edit_transaction_dialog(e=None):
+        page.pop_dialog()
+
+    def confirm_edit_transaction(e):
+        edit_txn_error.value = ""
+        try:
+            amount = float(edit_txn_amount_field.value)
+        except (ValueError, TypeError):
+            edit_txn_error.value = "Enter a valid amount"
+            page.update()
+            return
+        if not edit_txn_account_dropdown.value:
+            edit_txn_error.value = "Pick an account"
+            page.update()
+            return
+        if not edit_txn_category_dropdown.value:
+            edit_txn_error.value = "Pick a category"
+            page.update()
+            return
+
+        type_ = "income" if edit_txn_type_toggle.selected_index == 0 else "expense"
+        try:
+            db.update_transaction(
+                edit_txn_state["id"],
+                int(edit_txn_account_dropdown.value),
+                type_,
+                amount,
+                edit_txn_category_dropdown.value,
+                edit_txn_note_field.value or "",
+                edit_txn_date_field.value,
+            )
+        except ValueError as err:
+            edit_txn_error.value = str(err)
+            page.update()
+            return
+
+        page.pop_dialog()
+        after_transaction_change()
+
+    edit_transaction_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Edit Transaction"),
+        content=ft.Column(
+            [
+                edit_txn_type_toggle,
+                edit_txn_amount_field,
+                edit_txn_account_dropdown,
+                edit_txn_category_dropdown,
+                edit_txn_note_field,
+                edit_txn_date_field,
+                edit_txn_error,
+            ],
+            tight=True,
+            spacing=12,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_edit_transaction_dialog),
+            ft.TextButton("Save", on_click=confirm_edit_transaction),
+        ],
+    )
+
+    def open_edit_transaction_dialog(transaction_id):
+        t = db.get_transaction(transaction_id)
+        if not t:
+            return
+        edit_txn_state["id"] = transaction_id
+        is_income = t["type"] == "income"
+        edit_txn_type_toggle.selected_index = 0 if is_income else 1
+
+        names = list(INCOME_CATEGORIES if is_income else EXPENSE_CATEGORIES)
+        if t["category"] not in names:
+            names.append(t["category"])  # keep a since-deleted category selectable
+        edit_txn_category_dropdown.options = [ft.dropdown.Option(c) for c in names]
+        edit_txn_category_dropdown.value = t["category"]
+
+        edit_txn_account_dropdown.options = [
+            ft.dropdown.Option(key=str(a_id), text=name) for (a_id, name, _bal) in db.get_accounts()
+        ]
+        edit_txn_account_dropdown.value = str(t["account_id"])
+        edit_txn_amount_field.value = str(t["amount"])
+        edit_txn_note_field.value = t["note"] or ""
+        edit_txn_date_field.value = t["date"]
+        edit_txn_error.value = ""
+        page.show_dialog(edit_transaction_dialog)
+
+    # --- Delete transaction confirmation ---
+    delete_txn_state = {"id": None}
+
+    def close_delete_transaction_dialog(e=None):
+        page.pop_dialog()
+
+    def confirm_delete_transaction(e):
+        try:
+            db.delete_transaction(delete_txn_state["id"])
+        except ValueError:
+            pass  # it was already gone
+        page.pop_dialog()
+        after_transaction_change()
+
+    delete_transaction_dialog = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("Delete Transaction"),
+        content=ft.Text(""),
+        actions=[
+            ft.TextButton("Cancel", on_click=close_delete_transaction_dialog),
+            ft.TextButton("Delete", on_click=confirm_delete_transaction),
+        ],
+    )
+
+    def open_delete_transaction_dialog(transaction_id):
+        t = db.get_transaction(transaction_id)
+        if not t:
+            return
+        delete_txn_state["id"] = transaction_id
+        effect = "taken back out of" if t["type"] == "income" else "returned to"
+        delete_transaction_dialog.content = ft.Text(
+            f"Delete this {t['category']} {t['type']} of \u20b9{t['amount']:,.2f} from {t['date']}? "
+            f"The money will be {effect} the account."
+        )
+        page.show_dialog(delete_transaction_dialog)
+
+    # --- View All: one month at a time, with month navigation ---
+    history_state = {"ym": None, "open": False}
+    history_view = ft.Column(spacing=16, scroll=ft.ScrollMode.AUTO, expand=True)
+    MONTH_NAMES = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ]
+
+    def shift_history_month(direction):
+        # direction -1 = an earlier month, +1 = a later month
+        history_state["ym"] = db.shift_month(-direction, history_state["ym"])
+        build_history()
+
+    def build_history():
+        ym = history_state["ym"]
+        year, month = ym.split("-")
+        is_current_month = ym == db.shift_month(0)
+        income, expense, net = db.get_monthly_cash_flow(ym)
+        txns = db.get_transactions_for_month(ym)
+
+        txn_rows = []
+        for t in txns:
+            txn_rows.append(transaction_row(t))
+            txn_rows.append(ft.Divider(height=1))
+        if not txn_rows:
+            txn_rows = [ft.Text("No transactions in this month", size=12, color=ft.Colors.GREY)]
+
+        net_color = ft.Colors.GREEN if net >= 0 else ft.Colors.RED
+        controls = [
+            ft.Row(
+                [
+                    ft.IconButton(icon=ft.Icons.ARROW_BACK, on_click=close_history),
+                    ft.Text("All Transactions", size=22, weight=ft.FontWeight.BOLD),
+                ]
+            ),
+            card(
+                ft.Row(
+                    [
+                        ft.IconButton(icon=ft.Icons.CHEVRON_LEFT, on_click=lambda e: shift_history_month(-1)),
+                        ft.Text(
+                            f"{MONTH_NAMES[int(month) - 1]} {year}",
+                            weight=ft.FontWeight.BOLD,
+                            expand=True,
+                            text_align=ft.TextAlign.CENTER,
+                        ),
+                        ft.IconButton(
+                            icon=ft.Icons.CHEVRON_RIGHT,
+                            disabled=is_current_month,
+                            on_click=lambda e: shift_history_month(1),
+                        ),
+                    ]
+                )
+            ),
+            card(
+                ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                ft.Text("Income", size=12, color=ft.Colors.GREY),
+                                ft.Text(f"\u20b9{income:,.2f}", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
+                            ]
+                        ),
+                        ft.Column(
+                            [
+                                ft.Text("Expense", size=12, color=ft.Colors.GREY),
+                                ft.Text(f"\u20b9{expense:,.2f}", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
+                            ]
+                        ),
+                        ft.Column(
+                            [
+                                ft.Text("Net", size=12, color=ft.Colors.GREY),
+                                ft.Text(f"\u20b9{net:,.2f}", size=16, weight=ft.FontWeight.BOLD, color=net_color),
+                            ]
+                        ),
+                    ],
+                    spacing=30,
+                )
+            ),
+            card(
+                ft.Column(
+                    [ft.Text(f"{len(txns)} transactions", size=14, color=ft.Colors.GREY)] + txn_rows,
+                    spacing=10,
+                )
+            ),
+        ]
+        history_view.controls.clear()
+        history_view.controls.extend(controls)
+        page.update()
+
+    def open_history(e=None):
+        history_state["ym"] = db.shift_month(0)
+        history_state["open"] = True
+        body.content = history_view
+        build_history()
+
+    def close_history(e=None):
+        history_state["open"] = False
+        body.content = add_content
+        refresh_add_transactions()
         page.update()
 
     recurring_chips_row = ft.Row(wrap=True, spacing=8)
@@ -619,6 +917,20 @@ def main(page: ft.Page):
                         add_feedback,
                     ],
                     spacing=16,
+                )
+            ),
+            card(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text("Recent Transactions", size=14, color=ft.Colors.GREY, expand=True),
+                                ft.TextButton("View all", on_click=open_history),
+                            ]
+                        ),
+                        recent_txn_column,
+                    ],
+                    spacing=10,
                 )
             ),
         ],
@@ -1571,6 +1883,7 @@ def main(page: ft.Page):
 
     def on_nav_change(e):
         index = e.control.selected_index
+        history_state["open"] = False  # leaving View All, if it was open
         if index == 0:
             build_home()
         elif index == 2:
